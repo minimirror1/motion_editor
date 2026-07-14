@@ -344,6 +344,39 @@ const isMotionNumber = (value: MotionValue | undefined): value is number =>
 
 const framesToSeconds = (frames: number) => frames * MOTION_FRAME_INTERVAL_SECONDS;
 
+// Maya Insert Key 방식 샘플링: 해당 프레임에 키가 있으면 그 값, 없으면 인접 키 선형 보간
+// (렌더되는 폴리라인과 동일), 한쪽만 있으면 그 값, 키가 없으면 null.
+const sampleAxisValueAtFrame = (values: MotionValue[], frame: number): number | null => {
+  const direct = values[frame];
+  if (isMotionNumber(direct)) return direct;
+
+  let previousFrame = -1;
+  for (let candidate = Math.min(frame, values.length - 1); candidate >= 0; candidate -= 1) {
+    if (isMotionNumber(values[candidate])) {
+      previousFrame = candidate;
+      break;
+    }
+  }
+
+  let nextFrame = -1;
+  for (let candidate = Math.max(frame + 1, 0); candidate < values.length; candidate += 1) {
+    if (isMotionNumber(values[candidate])) {
+      nextFrame = candidate;
+      break;
+    }
+  }
+
+  const previousValue = previousFrame >= 0 ? (values[previousFrame] as number) : null;
+  const nextValue = nextFrame >= 0 ? (values[nextFrame] as number) : null;
+
+  if (previousValue !== null && nextValue !== null) {
+    const ratio = (frame - previousFrame) / (nextFrame - previousFrame);
+    return previousValue + (nextValue - previousValue) * ratio;
+  }
+
+  return previousValue ?? nextValue;
+};
+
 const handleAngleToSlope = (angle: number) => Math.tan((angle * Math.PI) / 180);
 
 const parseCsvRecords = (text: string) => {
@@ -2689,6 +2722,52 @@ export function GraphEditor() {
     setNodeDegreeInput(formatStatNumber(targetValue));
   };
 
+  // Maya Insert Key (S키/더블클릭): 커브 보간 값 그대로 키를 삽입해 곡선 모양을 유지한다.
+  // 이미 키가 있는 프레임과 생성 세그먼트 내부는 no-op (유령 undo 방지).
+  const insertKeyAtFrame = (frame: number) => {
+    if (!selectedAxisRecord) return;
+
+    const targetFrame = clamp(Math.round(frame), 0, MAX_TIMELINE_FRAME);
+    const isInsideGeneratedSegment = generatedSegments.some(
+      (segment) =>
+        segment.axisIndex === selectedAxisRecord.index &&
+        targetFrame >= segment.startFrame &&
+        targetFrame <= segment.endFrame,
+    );
+
+    if (isInsideGeneratedSegment || isMotionNumber(selectedAxisRecord.values[targetFrame])) return;
+
+    const sampledValue = sampleAxisValueAtFrame(selectedAxisRecord.values, targetFrame);
+    if (sampledValue === null) return;
+
+    pushUndoSnapshot();
+
+    const nextNode = { axisIndex: selectedAxisRecord.index, frame: targetFrame };
+
+    setAxes((current) =>
+      current.map((axis) => {
+        if (axis.index !== selectedAxisRecord.index) return axis;
+
+        const nextValues = [...axis.values];
+        while (nextValues.length <= targetFrame) {
+          nextValues.push(null);
+        }
+        nextValues[targetFrame] = sampledValue;
+
+        return { ...axis, values: nextValues };
+      }),
+    );
+    setSelectedNode(nextNode);
+    setSelectedNodes([nextNode]);
+    setNodeSelectionKind("single");
+    setCurrentFrame(targetFrame);
+    setNodeDegreeInput(formatStatNumber(sampledValue));
+  };
+
+  const insertKeyAtPlayhead = () => {
+    insertKeyAtFrame(displayedCurrentFrame);
+  };
+
   const handleNodeDegreeInputChange = (value: string) => {
     setNodeDegreeInput(value);
   };
@@ -3145,8 +3224,22 @@ export function GraphEditor() {
     setYRange({ min: bounds.minValue - valuePadding, max: bounds.maxValue + valuePadding });
   };
 
-  const globalShortcutHandlersRef = useRef({ undoLastEdit, redoLastEdit, fitGraph, focusSelectedAxisAtPlayhead });
-  globalShortcutHandlersRef.current = { undoLastEdit, redoLastEdit, fitGraph, focusSelectedAxisAtPlayhead };
+  const globalShortcutHandlersRef = useRef({
+    undoLastEdit,
+    redoLastEdit,
+    fitGraph,
+    focusSelectedAxisAtPlayhead,
+    insertKeyAtPlayhead,
+    deleteSelectedNodes,
+  });
+  globalShortcutHandlersRef.current = {
+    undoLastEdit,
+    redoLastEdit,
+    fitGraph,
+    focusSelectedAxisAtPlayhead,
+    insertKeyAtPlayhead,
+    deleteSelectedNodes,
+  };
 
   useEffect(() => {
     const handleGlobalShortcutKeyDown = (event: KeyboardEvent) => {
@@ -3175,6 +3268,18 @@ export function GraphEditor() {
       if (event.key.toLowerCase() === "a") {
         event.preventDefault();
         globalShortcutHandlersRef.current.fitGraph();
+        return;
+      }
+
+      if (event.key.toLowerCase() === "s") {
+        event.preventDefault();
+        globalShortcutHandlersRef.current.insertKeyAtPlayhead();
+        return;
+      }
+
+      if (event.key === "Delete" || event.key === "Backspace") {
+        event.preventDefault();
+        globalShortcutHandlersRef.current.deleteSelectedNodes();
       }
     };
 
@@ -3819,6 +3924,15 @@ export function GraphEditor() {
     }
   };
 
+  // Maya Insert Key Tool 파리티: 플롯 더블클릭으로 해당 프레임에 커브 값 유지 키 삽입.
+  const handlePlotDoubleClick = (event: MouseEvent<HTMLDivElement>) => {
+    if (selectedAxis === null) return;
+
+    const rect = event.currentTarget.getBoundingClientRect();
+    const ratio = clamp((event.clientX - rect.left) / rect.width, 0, 1);
+    insertKeyAtFrame(visibleRange.start + ratio * visibleFrameSpan);
+  };
+
   const handlePointerDown = (event: PointerEvent<HTMLDivElement>) => {
     if (event.button !== 2) {
       setGenerationMenu(null);
@@ -4435,6 +4549,7 @@ export function GraphEditor() {
             ref={plotSurfaceRef}
             onWheel={handleYWheel}
             onContextMenu={handlePlotContextMenu}
+            onDoubleClick={handlePlotDoubleClick}
             onPointerDown={handlePointerDown}
             onPointerMove={handlePointerMove}
             onPointerUp={handlePointerEnd}
