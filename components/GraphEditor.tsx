@@ -78,6 +78,7 @@ type EditorSnapshot = {
   generatedSegments: GeneratedSegment[];
   nodeDegreeInput: string;
   nodeSelectionKind: NodeSelectionKind;
+  playbackRange: VisibleRange;
   selectedAxis: number | null;
   selectedGeneratedHandle: SelectedGeneratedHandle | null;
   selectedGeneratedSegmentKey: string | null;
@@ -584,17 +585,6 @@ const clampFreeRange = (start: number, span: number): VisibleRange => {
     start: nextStart,
     end: nextStart + nextSpan,
   };
-};
-
-const clampFrameToVisibleRange = (frame: number, range: VisibleRange, maxIndex: number) => {
-  const minVisibleFrame = Math.max(0, Math.ceil(range.start));
-  const maxVisibleFrame = Math.min(maxIndex, Math.floor(range.end));
-
-  if (maxVisibleFrame < minVisibleFrame) {
-    return clamp(Math.round(range.start), 0, maxIndex);
-  }
-
-  return clamp(Math.round(frame), minVisibleFrame, maxVisibleFrame);
 };
 
 const buildNiceStep = (roughStep: number) => {
@@ -1511,6 +1501,7 @@ export function GraphEditor() {
   const dragRef = useRef<DragState | null>(null);
   const plotSurfaceRef = useRef<HTMLDivElement>(null);
   const playheadDragRef = useRef(false);
+  const playbackRangeDragRef = useRef<"start" | "end" | null>(null);
   const boxSelectRef = useRef<BoxSelectState | null>(null);
   const nodeValueDragRef = useRef<NodeValueDragState | null>(null);
   const generatedHandleDragRef = useRef<GeneratedHandleDragState | null>(null);
@@ -1529,6 +1520,7 @@ export function GraphEditor() {
   const [error, setError] = useState("");
   const [currentFrame, setCurrentFrame] = useState(DEFAULT_CURRENT_FRAME);
   const [visibleRange, setVisibleRange] = useState<VisibleRange>({ start: 0, end: DEFAULT_TIMELINE_MAX_FRAME });
+  const [playbackRange, setPlaybackRange] = useState<VisibleRange>({ start: 0, end: DEFAULT_TIMELINE_MAX_FRAME });
   const [yRange, setYRange] = useState<DegreeRange>({ min: -90, max: 90 });
   const [isPanning, setIsPanning] = useState(false);
   const [isDraggingPlayhead, setIsDraggingPlayhead] = useState(false);
@@ -1562,6 +1554,7 @@ export function GraphEditor() {
     generatedSegments: cloneGeneratedSegments(generatedSegments),
     nodeDegreeInput,
     nodeSelectionKind,
+    playbackRange: { ...playbackRange },
     selectedAxis,
     selectedGeneratedHandle: cloneSelectedGeneratedHandle(selectedGeneratedHandle),
     selectedGeneratedSegmentKey,
@@ -1585,6 +1578,7 @@ export function GraphEditor() {
     setNodeSelectionKind(snapshot.nodeSelectionKind);
     setCurrentFrame(snapshot.currentFrame);
     setVisibleRange({ ...snapshot.visibleRange });
+    setPlaybackRange({ ...snapshot.playbackRange });
     setYRange({ ...snapshot.yRange });
     setNodeDegreeInput(snapshot.nodeDegreeInput);
     setSelectionRect(null);
@@ -1634,10 +1628,17 @@ export function GraphEditor() {
     currentFrame,
     Math.ceil(visibleRange.end),
   );
-  const displayedCurrentFrame = clampFrameToVisibleRange(currentFrame, visibleRange, timelineMaxIndex);
+  const displayedCurrentFrame = clamp(Math.round(currentFrame), 0, timelineMaxIndex);
   const playheadPosition = clamp(((displayedCurrentFrame - visibleRange.start) / visibleFrameSpan) * 100, 0, 100);
   const isPlayheadVisible =
     displayedCurrentFrame >= visibleRange.start && displayedCurrentFrame <= visibleRange.end;
+  const playbackRangeStartPct = clamp(
+    ((playbackRange.start - visibleRange.start) / visibleFrameSpan) * 100,
+    0,
+    100,
+  );
+  const playbackRangeEndPct = clamp(((playbackRange.end - visibleRange.start) / visibleFrameSpan) * 100, 0, 100);
+  const isPlaybackRangeVisible = playbackRange.end >= visibleRange.start && playbackRange.start <= visibleRange.end;
   const isPlayheadAtOtherAxisRightEdge =
     selectedAxis !== null &&
     axes.some(
@@ -2175,6 +2176,7 @@ export function GraphEditor() {
     setError(parsedAxes.length === 0 ? "numeric row not found" : "");
     setYRange(buildDataYRange(parsedAxes));
     setVisibleRange({ start: 0, end: Math.max(nextMaxFrame, 1) });
+    setPlaybackRange({ start: 0, end: Math.max(nextMaxFrame, 1) });
   };
 
   const handleFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -2793,13 +2795,6 @@ export function GraphEditor() {
 
   const applyVisibleRange = (nextRange: VisibleRange) => {
     setVisibleRange(nextRange);
-    setCurrentFrame((current) =>
-      clampFrameToVisibleRange(
-        current,
-        nextRange,
-        Math.max(DEFAULT_TIMELINE_MAX_FRAME, maxFrameIndex, current, Math.ceil(nextRange.end)),
-      ),
-    );
   };
 
   const fitGraph = () => {
@@ -2874,39 +2869,25 @@ export function GraphEditor() {
     if (!container) return;
 
     const rect = container.getBoundingClientRect();
-    const ratio = (clientX - rect.left) / rect.width;
+    const ratio = clamp((clientX - rect.left) / rect.width, 0, 1);
     const span = visibleRange.end - visibleRange.start;
     const nextFrame = clamp(Math.round(visibleRange.start + span * ratio), 0, MAX_TIMELINE_FRAME);
-    let nextRange = visibleRange;
-
-    if (nextFrame < visibleRange.start) {
-      nextRange = clampFreeRange(Math.max(0, nextFrame), span);
-    } else if (nextFrame > visibleRange.end) {
-      nextRange = clampFreeRange(Math.max(0, nextFrame - span), span);
-    }
-
-    const nextCurrentFrame = clampFrameToVisibleRange(
-      nextFrame,
-      nextRange,
-      Math.max(timelineMaxIndex, nextFrame, Math.ceil(nextRange.end)),
-    );
     const nextSelectedNode =
-      selectedAxisRecord && isMotionNumber(selectedAxisRecord.values[nextCurrentFrame])
+      selectedAxisRecord && isMotionNumber(selectedAxisRecord.values[nextFrame])
         ? {
             axisIndex: selectedAxisRecord.index,
-            frame: nextCurrentFrame,
+            frame: nextFrame,
           }
         : null;
 
-    setVisibleRange(nextRange);
-    setCurrentFrame(nextCurrentFrame);
+    setCurrentFrame(nextFrame);
     setSelectedNode(nextSelectedNode);
     setSelectedNodes(nextSelectedNode ? [nextSelectedNode] : []);
     setNodeSelectionKind(nextSelectedNode ? "single" : null);
     setSelectedGeneratedSegmentKey(null);
     setSelectedGeneratedHandle(null);
     if (nextSelectedNode) {
-      syncNodeDegreeInput(selectedAxisRecord?.values[nextCurrentFrame]);
+      syncNodeDegreeInput(selectedAxisRecord?.values[nextFrame]);
     }
   };
 
@@ -2937,6 +2918,76 @@ export function GraphEditor() {
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
+  };
+
+  const handleRulerPointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    if ((event.target as HTMLElement).closest(".playbackRangeHandle")) return;
+
+    event.currentTarget.setPointerCapture(event.pointerId);
+    playheadDragRef.current = true;
+    setIsDraggingPlayhead(true);
+    setSelectedNode(null);
+    setSelectedNodes([]);
+    setNodeSelectionKind(null);
+    setPlayheadFromClientX(event.clientX, event.currentTarget);
+  };
+
+  const handleRulerPointerMove = (event: PointerEvent<HTMLDivElement>) => {
+    if (!playheadDragRef.current) return;
+
+    setPlayheadFromClientX(event.clientX, event.currentTarget);
+  };
+
+  const handleRulerPointerEnd = (event: PointerEvent<HTMLDivElement>) => {
+    playheadDragRef.current = false;
+    setIsDraggingPlayhead(false);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  };
+
+  const setPlaybackRangeEdgeFromClientX = (clientX: number, container: HTMLElement, edge: "start" | "end") => {
+    const rect = container.getBoundingClientRect();
+    const ratio = (clientX - rect.left) / rect.width;
+    const span = visibleRange.end - visibleRange.start;
+    const nextFrame = clamp(Math.round(visibleRange.start + span * ratio), 0, MAX_TIMELINE_FRAME);
+
+    setPlaybackRange((current) =>
+      edge === "start"
+        ? { start: Math.min(nextFrame, current.end), end: current.end }
+        : { start: current.start, end: Math.max(nextFrame, current.start) },
+    );
+  };
+
+  const handlePlaybackRangeHandlePointerDown = (event: PointerEvent<HTMLButtonElement>, edge: "start" | "end") => {
+    if (event.button !== 0) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    pushUndoSnapshot();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    playbackRangeDragRef.current = edge;
+    setPlaybackRangeEdgeFromClientX(event.clientX, event.currentTarget.parentElement as HTMLElement, edge);
+  };
+
+  const handlePlaybackRangeHandlePointerMove = (event: PointerEvent<HTMLButtonElement>) => {
+    const edge = playbackRangeDragRef.current;
+    if (!edge) return;
+
+    setPlaybackRangeEdgeFromClientX(event.clientX, event.currentTarget.parentElement as HTMLElement, edge);
+  };
+
+  const handlePlaybackRangeHandlePointerEnd = (event: PointerEvent<HTMLButtonElement>) => {
+    playbackRangeDragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  };
+
+  const framePlaybackRange = () => {
+    setVisibleRange({ ...playbackRange });
   };
 
   const getPlotPointerPercent = (event: PointerEvent<HTMLDivElement>) => {
@@ -3727,6 +3778,12 @@ export function GraphEditor() {
             <path d="M6 3H3v3M13 6V3h-3M10 13h3v-3M3 10v3h3" />
           </svg>
         </button>
+        <button className="geTool" type="button" title="Frame Playback Range" onClick={framePlaybackRange}>
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#7ec24f" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M6 3H3v3M13 6V3h-3M10 13h3v-3M3 10v3h3" />
+            <path d="M6 8h4" />
+          </svg>
+        </button>
       </div>
 
       {/* ============ MAIN ROW ============ */}
@@ -3802,12 +3859,45 @@ export function GraphEditor() {
 
         {/* ---- GRAPH ---- */}
         <div className="geGraph">
-          <div className="geRuler" onWheel={handleWheel}>
+          <div
+            className="geRuler"
+            onWheel={handleWheel}
+            onPointerDown={handleRulerPointerDown}
+            onPointerMove={handleRulerPointerMove}
+            onPointerUp={handleRulerPointerEnd}
+            onPointerCancel={handleRulerPointerEnd}
+          >
+            {isPlaybackRangeVisible ? (
+              <div
+                className="playbackRangeBar"
+                style={{ left: `${playbackRangeStartPct}%`, width: `${Math.max(playbackRangeEndPct - playbackRangeStartPct, 0)}%` }}
+              />
+            ) : null}
             {frameMarks.map((mark) => (
               <span className="geRulerLbl" key={`${mark.frame}-${mark.x}`} style={{ left: `${mark.x}%` }}>
                 {formatFrameTime(mark.frame)}
               </span>
             ))}
+            <button
+              aria-label={`Playback range start ${formatFrameTime(playbackRange.start)}`}
+              className="playbackRangeHandle start"
+              type="button"
+              style={{ left: `${playbackRangeStartPct}%` }}
+              onPointerDown={(event) => handlePlaybackRangeHandlePointerDown(event, "start")}
+              onPointerMove={handlePlaybackRangeHandlePointerMove}
+              onPointerUp={handlePlaybackRangeHandlePointerEnd}
+              onPointerCancel={handlePlaybackRangeHandlePointerEnd}
+            />
+            <button
+              aria-label={`Playback range end ${formatFrameTime(playbackRange.end)}`}
+              className="playbackRangeHandle end"
+              type="button"
+              style={{ left: `${playbackRangeEndPct}%` }}
+              onPointerDown={(event) => handlePlaybackRangeHandlePointerDown(event, "end")}
+              onPointerMove={handlePlaybackRangeHandlePointerMove}
+              onPointerUp={handlePlaybackRangeHandlePointerEnd}
+              onPointerCancel={handlePlaybackRangeHandlePointerEnd}
+            />
             {isPlayheadVisible ? (
               <button
                 aria-label={`Current time ${formatFrameTime(displayedCurrentFrame)}`}

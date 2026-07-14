@@ -2081,6 +2081,42 @@ button {
   white-space: nowrap;
 }
 
+.playbackRangeBar {
+  background: rgba(120, 170, 90, 0.28);
+  bottom: 0;
+  position: absolute;
+  top: 0;
+  z-index: 1;
+}
+
+.playbackRangeHandle {
+  appearance: none;
+  background: #7ec24f;
+  border: 0;
+  bottom: 0;
+  cursor: ew-resize;
+  padding: 0;
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  width: 4px;
+  z-index: 5;
+}
+
+.playbackRangeHandle:hover,
+.playbackRangeHandle:active {
+  background: #9be073;
+  width: 5px;
+}
+
+.playbackRangeHandle.start {
+  border-radius: 2px 0 0 2px;
+}
+
+.playbackRangeHandle.end {
+  border-radius: 0 2px 2px 0;
+}
+
 .gefill {
   background: #262626;
   flex: 1;
