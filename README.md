@@ -79,8 +79,25 @@ npm install
 - Flat/Stepped 탄젠트 프리셋 (기존 Linear/Bezier 등과 동일한 방식으로 적용)
 - 생성 세그먼트 핸들 Break/Unify(In·Out 각도 독립/동기화), Lock/Free Weight(길이 동기화)
 - 키 수평 드래그로 시간 이동(다중 선택은 값 고정), 방향키 Nudge(Shift=10프레임)
-- 노드 범위 붙여넣기 Merge/Insert/Replace 모드
+- 노드 범위 붙여넣기 Merge/Insert/Replace 모드, 우클릭 메뉴에 Cut 추가
 - 편집한 모션 데이터를 CSV로 저장
+
+### 단축키
+
+| 동작 | 단축키 |
+|------|--------|
+| 팬 | MMB 드래그 |
+| 줌 | Wheel (플롯 위 Shift+Wheel = 시간 전용 줌) |
+| 시간/값 축 잠금 팬 | Shift + MMB 드래그 |
+| 그래프 스크럽(플레이헤드만 이동) | K + 드래그 |
+| 키 시간 이동 | 키를 좌우로 드래그 |
+| 키 프레임 Nudge | ←/→ (Shift = 10프레임) |
+| Frame Selection | F |
+| Frame All | A |
+| Undo / Redo | Ctrl+Z / Ctrl+Shift+Z |
+| 선택 해제 / 메뉴 닫기 | Escape |
+
+텍스트 입력 필드에 포커스가 있을 때는 위 단축키가 동작하지 않고 브라우저 기본 동작을 따른다.
 
 ### 파일 입출력 조합
 

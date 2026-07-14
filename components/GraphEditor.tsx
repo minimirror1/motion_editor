@@ -3114,6 +3114,43 @@ export function GraphEditor() {
     setYRange({ min: bounds.minValue - valuePadding, max: bounds.maxValue + valuePadding });
   };
 
+  const globalShortcutHandlersRef = useRef({ undoLastEdit, redoLastEdit, fitGraph, focusSelectedAxisAtPlayhead });
+  globalShortcutHandlersRef.current = { undoLastEdit, redoLastEdit, fitGraph, focusSelectedAxisAtPlayhead };
+
+  useEffect(() => {
+    const handleGlobalShortcutKeyDown = (event: KeyboardEvent) => {
+      if (isEditableTarget(event.target)) return;
+
+      const isModifierHeld = event.ctrlKey || event.metaKey;
+
+      if (isModifierHeld && event.key.toLowerCase() === "z") {
+        event.preventDefault();
+        if (event.shiftKey) {
+          globalShortcutHandlersRef.current.redoLastEdit();
+        } else {
+          globalShortcutHandlersRef.current.undoLastEdit();
+        }
+        return;
+      }
+
+      if (isModifierHeld) return;
+
+      if (event.key.toLowerCase() === "f") {
+        event.preventDefault();
+        globalShortcutHandlersRef.current.focusSelectedAxisAtPlayhead();
+        return;
+      }
+
+      if (event.key.toLowerCase() === "a") {
+        event.preventDefault();
+        globalShortcutHandlersRef.current.fitGraph();
+      }
+    };
+
+    window.addEventListener("keydown", handleGlobalShortcutKeyDown);
+    return () => window.removeEventListener("keydown", handleGlobalShortcutKeyDown);
+  }, []);
+
   const handleWheel = (event: WheelEvent<HTMLDivElement>) => {
     event.preventDefault();
 
@@ -3396,6 +3433,11 @@ export function GraphEditor() {
     setCopiedGeneratedSegment(null);
     setError("");
     setNodeRangeContextMenu(null);
+  };
+
+  const cutNodeRangeFromContextMenu = () => {
+    copyNodeRangeFromContextMenu();
+    deleteSelectedNodes();
   };
 
   const pasteNodeRangeFromContextMenu = () => {
@@ -4998,9 +5040,14 @@ export function GraphEditor() {
           onPointerDown={(event) => event.stopPropagation()}
         >
           {nodeRangeContextMenu.kind === "copy" ? (
-            <button className="axisContextMenuItem" type="button" onClick={copyNodeRangeFromContextMenu}>
-              Copy
-            </button>
+            <>
+              <button className="axisContextMenuItem" type="button" onClick={cutNodeRangeFromContextMenu}>
+                Cut
+              </button>
+              <button className="axisContextMenuItem" type="button" onClick={copyNodeRangeFromContextMenu}>
+                Copy
+              </button>
+            </>
           ) : (
             <>
               {(["merge", "insert", "replace"] as const).map((mode) => (

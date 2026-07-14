@@ -389,8 +389,15 @@ Paste 모드:
 
 **수용 기준**
 
-- [ ] 핵심 조작이 버튼 없이 단축으로 가능
-- [ ] 툴바 수치가 편집·반영됨
+- [x] 핵심 조작이 버튼 없이 단축으로 가능
+- [x] 툴바 수치가 편집·반영됨
+
+**구현 메모 (제품 결정)**
+
+- In/Out 각도·가중치는 W10에서 이미 편집 가능하게 구현됨 (In∠/Out∠, In/Out Weight).
+- 전역 단축키 추가: `Ctrl+Z`/`Ctrl+Shift+Z`(Undo/Redo), `F`(Frame Selection), `A`(Frame All). 텍스트 입력 포커스 중에는 무시(브라우저 기본 동작 유지).
+- 마킹 메뉴: 탄젠트 프리셋(Linear/Flat/Stepped/Bezier 등)은 기존 ctrl-선택 우클릭 생성 메뉴에 이미 노출됨(W9). 노드 범위 우클릭 메뉴에 **Cut** 버튼 추가(Copy+Delete). Frame 명령(All/Selection/Playback Range)은 이번 패스에서는 툴바 버튼 + 위 단축키로만 제공하고, 별도의 "빈 영역 우클릭 Frame 메뉴"는 만들지 않음 — 수용 기준이 요구하는 것은 "버튼 없이 단축으로 가능"이며 이는 단축키만으로 충족되므로, 새 메뉴 상태를 추가하는 리스크 대비 가치가 낮다고 판단.
+- 단축키표는 README에 반영(아래 §참고).
 
 ---
 
@@ -433,7 +440,7 @@ Paste 모드:
 - [x] `data-clipboard`
 
 ### Phase 5 — UX
-- [ ] `ux-marking-stats`
+- [x] `ux-marking-stats`
 
 ---
 
