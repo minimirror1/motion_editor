@@ -725,6 +725,17 @@ button {
   opacity: 0.34;
 }
 
+.infinityCurve {
+  fill: none;
+  pointer-events: none;
+  stroke: rgba(255, 211, 79, 0.55);
+  stroke-dasharray: 5 4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.45;
+  vector-effect: non-scaling-stroke;
+}
+
 .nodeOverlay {
   inset: 0;
   pointer-events: none;
@@ -2250,6 +2261,28 @@ button {
 }
 
 .geField input:disabled {
+  color: #5a5a5a;
+  cursor: not-allowed;
+}
+
+.geField select {
+  background: #242424;
+  border: 1px solid #151515;
+  border-radius: 3px;
+  color: #d0d0d0;
+  font-size: 11px;
+  height: 22px;
+  min-width: 0;
+  outline: none;
+  padding: 0 4px;
+  width: 100%;
+}
+
+.geField select:focus:not(:disabled) {
+  border-color: #4ca6d6;
+}
+
+.geField select:disabled {
   color: #5a5a5a;
   cursor: not-allowed;
 }

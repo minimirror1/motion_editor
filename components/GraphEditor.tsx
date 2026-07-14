@@ -69,8 +69,13 @@ type ServerSaveAsState = {
 
 type SaveDestination = "client" | "server";
 
+type InfinityMode = "constant" | "cycle" | "oscillate" | "linear";
+
+type AxisInfinity = { pre: InfinityMode; post: InfinityMode };
+
 type EditorSnapshot = {
   axes: MotionAxis[];
+  axisInfinity: Record<number, AxisInfinity>;
   currentFrame: number;
   error: string;
   fileName: string;
@@ -356,6 +361,7 @@ const DEGREE_MATCH_TOLERANCE = 0.1;
 // 플롯 SVG 세로 매핑: 값 범위가 y% 92(하단)~8(상단), 총 84%를 차지한다 (기존 92/84 수식과 동일한 기하).
 const PLOT_VALUE_SPAN_PERCENT = 84;
 const NODE_DRAG_DEAD_ZONE_PX = 3;
+const DEFAULT_AXIS_INFINITY: AxisInfinity = { pre: "constant", post: "constant" };
 
 const isMotionNumber = (value: MotionValue | undefined): value is number =>
   typeof value === "number" && Number.isFinite(value);
@@ -467,6 +473,71 @@ const getLastMotionValueFrame = (values: MotionValue[]) => {
   }
 
   return null;
+};
+
+const getFirstMotionValueFrame = (values: MotionValue[]) => {
+  for (let frame = 0; frame < values.length; frame += 1) {
+    if (isMotionNumber(values[frame])) return frame;
+  }
+
+  return null;
+};
+
+const wrapModulo = (value: number, period: number) => ((value % period) + period) % period;
+
+// Maya Pre/Post Infinity 평가: 데이터 범위 밖 프레임의 값을 모드에 따라 계산한다.
+// cycle/oscillate는 원본 키 패턴(빈 프레임 포함)을 그대로 반복 복사하고,
+// linear는 가장자리 키와 안쪽 이웃 키의 기울기로 외삽한다.
+const evaluateInfinityFrame = (
+  values: MotionValue[],
+  firstFrame: number,
+  lastFrame: number,
+  frame: number,
+  mode: InfinityMode,
+): MotionValue => {
+  const period = lastFrame - firstFrame;
+  const edgeValue = frame < firstFrame ? values[firstFrame] : values[lastFrame];
+
+  if (mode === "constant" || period <= 0) {
+    return edgeValue ?? null;
+  }
+
+  if (mode === "cycle") {
+    return values[firstFrame + wrapModulo(frame - firstFrame, period)] ?? null;
+  }
+
+  if (mode === "oscillate") {
+    const phase = wrapModulo(frame - firstFrame, period * 2);
+    return values[firstFrame + (phase <= period ? phase : period * 2 - phase)] ?? null;
+  }
+
+  if (!isMotionNumber(edgeValue)) return null;
+
+  if (frame < firstFrame) {
+    let neighborFrame = -1;
+    for (let candidate = firstFrame + 1; candidate <= lastFrame; candidate += 1) {
+      if (isMotionNumber(values[candidate])) {
+        neighborFrame = candidate;
+        break;
+      }
+    }
+    if (neighborFrame < 0) return edgeValue;
+
+    const slope = ((values[neighborFrame] as number) - edgeValue) / (neighborFrame - firstFrame);
+    return edgeValue + slope * (frame - firstFrame);
+  }
+
+  let neighborFrame = -1;
+  for (let candidate = lastFrame - 1; candidate >= firstFrame; candidate -= 1) {
+    if (isMotionNumber(values[candidate])) {
+      neighborFrame = candidate;
+      break;
+    }
+  }
+  if (neighborFrame < 0) return edgeValue;
+
+  const slope = (edgeValue - (values[neighborFrame] as number)) / (lastFrame - neighborFrame);
+  return edgeValue + slope * (frame - lastFrame);
 };
 
 const getMotionSaveFrameCount = (axes: MotionAxis[]) =>
@@ -1609,6 +1680,7 @@ export function GraphEditor() {
   const [visibleRange, setVisibleRange] = useState<VisibleRange>({ start: 0, end: DEFAULT_TIMELINE_MAX_FRAME });
   const [playbackRange, setPlaybackRange] = useState<VisibleRange>({ start: 0, end: DEFAULT_TIMELINE_MAX_FRAME });
   const [yRange, setYRange] = useState<DegreeRange>({ min: -90, max: 90 });
+  const [axisInfinity, setAxisInfinity] = useState<Record<number, AxisInfinity>>({});
   const [isPanning, setIsPanning] = useState(false);
   const [isDraggingPlayhead, setIsDraggingPlayhead] = useState(false);
   const [isDraggingNodeValue, setIsDraggingNodeValue] = useState(false);
@@ -1635,6 +1707,7 @@ export function GraphEditor() {
 
   const createEditorSnapshot = (): EditorSnapshot => ({
     axes: cloneMotionAxes(axes),
+    axisInfinity: { ...axisInfinity },
     currentFrame,
     error,
     fileName,
@@ -1654,6 +1727,7 @@ export function GraphEditor() {
 
   const restoreEditorSnapshot = (snapshot: EditorSnapshot) => {
     setAxes(cloneMotionAxes(snapshot.axes));
+    setAxisInfinity({ ...snapshot.axisInfinity });
     setGeneratedSegments(cloneGeneratedSegments(snapshot.generatedSegments));
     generatedSegmentIdRef.current = snapshot.generatedSegmentId;
     setFileName(snapshot.fileName);
@@ -1838,6 +1912,53 @@ export function GraphEditor() {
         hasValueSpan: regionScaleBounds.maxValue - regionScaleBounds.minValue > 1e-9,
       }
     : null;
+  const selectedAxisInfinity =
+    (selectedAxisRecord ? axisInfinity[selectedAxisRecord.index] : undefined) ?? DEFAULT_AXIS_INFINITY;
+  // Pre/Post Infinity 점선 프리뷰: 선택 축의 데이터 범위 밖 뷰포트 구간을 모드에 따라 평가.
+  const infinityPreview = useMemo(() => {
+    if (!selectedAxisRecord) return null;
+
+    const modes = axisInfinity[selectedAxisRecord.index] ?? DEFAULT_AXIS_INFINITY;
+    if (modes.pre === "constant" && modes.post === "constant") return null;
+
+    const values = selectedAxisRecord.values;
+    const firstFrame = getFirstMotionValueFrame(values);
+    const lastFrame = getLastMotionValueFrame(values);
+    if (firstFrame === null || lastFrame === null) return null;
+
+    const visibleSpan = Math.max(visibleRange.end - visibleRange.start, 1);
+    const ySpan = Math.max(yRange.max - yRange.min, 1);
+    const stride = Math.max(1, Math.ceil(visibleSpan / 4000));
+    const toPoint = (frame: number, value: number) =>
+      `${((frame - visibleRange.start) / visibleSpan) * 100},${92 - ((value - yRange.min) / ySpan) * 84}`;
+
+    const buildSide = (mode: InfinityMode, fromFrame: number, toFrame: number) => {
+      if (mode === "constant" || toFrame < fromFrame) return null;
+
+      const points: string[] = [];
+      for (let frame = fromFrame; frame <= toFrame; frame += stride) {
+        const value = evaluateInfinityFrame(values, firstFrame, lastFrame, frame, mode);
+        if (isMotionNumber(value)) points.push(toPoint(frame, value));
+      }
+
+      return points.length >= 2 ? points.join(" ") : null;
+    };
+
+    const prePoints = buildSide(
+      modes.pre,
+      Math.max(Math.floor(visibleRange.start) - 1, 0),
+      Math.min(firstFrame, Math.ceil(visibleRange.end) + 1),
+    );
+    const postPoints = buildSide(
+      modes.post,
+      Math.max(lastFrame, Math.floor(visibleRange.start) - 1),
+      Math.ceil(visibleRange.end) + 1,
+    );
+
+    if (!prePoints && !postPoints) return null;
+
+    return { prePoints, postPoints };
+  }, [selectedAxisRecord, axisInfinity, visibleRange, yRange]);
   const copiedGeneratedSegmentPasteTarget = (() => {
     const targetNode = activeSelectedNodes.length === 1 ? activeSelectedNodes[0] : null;
 
@@ -2313,6 +2434,7 @@ export function GraphEditor() {
     setFileName(displayName);
     setServerRelativePath(serverPath);
     setAxes(parsedAxes);
+    setAxisInfinity({});
     setGeneratedSegments([]);
     generatedSegmentIdRef.current = 0;
     setSelectedGeneratedSegmentKey(null);
@@ -3616,6 +3738,71 @@ export function GraphEditor() {
     setVisibleRange({ ...playbackRange });
   };
 
+  const setAxisInfinityMode = (side: "pre" | "post", mode: InfinityMode) => {
+    if (!selectedAxisRecord) return;
+
+    const current = axisInfinity[selectedAxisRecord.index] ?? DEFAULT_AXIS_INFINITY;
+    if (current[side] === mode) return;
+
+    pushUndoSnapshot();
+    setAxisInfinity((previous) => ({
+      ...previous,
+      [selectedAxisRecord.index]: { ...current, [side]: mode },
+    }));
+  };
+
+  const canBakeInfinity =
+    selectedAxisRecord !== null &&
+    (selectedAxisInfinity.pre !== "constant" || selectedAxisInfinity.post !== "constant");
+
+  // Bake ∞: Playback Range 안에서 데이터 범위 밖 프레임에 infinity 평가값을 실제 키로 기록한다.
+  // CSV 저장은 조밀 데이터만 포함하므로 저장 전에 베이크해야 무한 반복이 파일에 반영된다.
+  const bakeInfinityToPlaybackRange = () => {
+    if (!selectedAxisRecord) return;
+
+    const modes = axisInfinity[selectedAxisRecord.index] ?? DEFAULT_AXIS_INFINITY;
+    const values = selectedAxisRecord.values;
+    const firstFrame = getFirstMotionValueFrame(values);
+    const lastFrame = getLastMotionValueFrame(values);
+    if (firstFrame === null || lastFrame === null) return;
+
+    const fromFrame = clamp(Math.round(playbackRange.start), 0, MAX_TIMELINE_FRAME);
+    const toFrame = clamp(Math.round(playbackRange.end), 0, MAX_TIMELINE_FRAME);
+    const writes: Array<{ frame: number; value: MotionValue }> = [];
+
+    for (let frame = fromFrame; frame <= toFrame; frame += 1) {
+      const side = frame < firstFrame ? "pre" : frame > lastFrame ? "post" : null;
+      if (!side || modes[side] === "constant") continue;
+
+      const nextValue = evaluateInfinityFrame(values, firstFrame, lastFrame, frame, modes[side]);
+      const currentValue = values[frame] ?? null;
+      if (nextValue === currentValue) continue;
+
+      writes.push({ frame, value: nextValue });
+    }
+
+    if (writes.length === 0) return;
+
+    pushUndoSnapshot();
+
+    setAxes((current) =>
+      current.map((axis) => {
+        if (axis.index !== selectedAxisRecord.index) return axis;
+
+        const maxWriteFrame = writes[writes.length - 1].frame;
+        const nextValues = [...axis.values];
+        while (nextValues.length <= maxWriteFrame) {
+          nextValues.push(null);
+        }
+        writes.forEach(({ frame, value }) => {
+          nextValues[frame] = value;
+        });
+
+        return { ...axis, values: nextValues };
+      }),
+    );
+  };
+
   const getPlotPointerPercent = (event: PointerEvent<HTMLDivElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
 
@@ -4799,6 +4986,13 @@ export function GraphEditor() {
                   </g>
                 );
               })}
+
+              {infinityPreview?.prePoints ? (
+                <polyline className="infinityCurve" points={infinityPreview.prePoints} />
+              ) : null}
+              {infinityPreview?.postPoints ? (
+                <polyline className="infinityCurve" points={infinityPreview.postPoints} />
+              ) : null}
             </svg>
 
             {yMarks.map((mark) => (
@@ -5186,6 +5380,42 @@ export function GraphEditor() {
               </button>
               <button type="button" disabled={!canShiftNode} onClick={shiftSelectedNodeToLeft}>
                 Shift
+              </button>
+            </div>
+            <label className="geField">
+              <span>Pre &infin;</span>
+              <select
+                disabled={!selectedAxisRecord}
+                value={selectedAxisInfinity.pre}
+                onChange={(event) => setAxisInfinityMode("pre", event.target.value as InfinityMode)}
+              >
+                <option value="constant">Constant</option>
+                <option value="cycle">Cycle</option>
+                <option value="oscillate">Oscillate</option>
+                <option value="linear">Linear</option>
+              </select>
+            </label>
+            <label className="geField">
+              <span>Post &infin;</span>
+              <select
+                disabled={!selectedAxisRecord}
+                value={selectedAxisInfinity.post}
+                onChange={(event) => setAxisInfinityMode("post", event.target.value as InfinityMode)}
+              >
+                <option value="constant">Constant</option>
+                <option value="cycle">Cycle</option>
+                <option value="oscillate">Oscillate</option>
+                <option value="linear">Linear</option>
+              </select>
+            </label>
+            <div className="geKeyBtns">
+              <button
+                type="button"
+                disabled={!canBakeInfinity}
+                title="Playback Range 구간에 ∞ 평가값을 실제 키로 굽기 (CSV 저장에 포함되려면 필수)"
+                onClick={bakeInfinityToPlaybackRange}
+              >
+                Bake &infin;
               </button>
             </div>
           </div>
