@@ -288,8 +288,6 @@ const SELECTED_GENERATED_SEGMENT_COLOR = "#62d6ff";
 const SHOW_ALL_NODE_MARKERS_VISIBLE_SPAN = 200;
 const NODE_MARKER_SIZE_SCALE = 0.85;
 const DISCONNECTED_NODE_MARKER_MULTIPLIER = 2.1 * (2 / NODE_MARKER_SIZE_SCALE);
-const FOCUS_FRAME_RADIUS = 100;
-const FOCUS_DEGREE_RADIUS = 50;
 const MAX_UNDO_HISTORY = 80;
 const generationModeOptions: Array<{ id: GeneratedSegmentMode; label: string }> = [
   { id: "linear", label: "Linear" },
@@ -568,8 +566,8 @@ const clampRange = (start: number, span: number, maxIndex: number): VisibleRange
   }
 
   const minSpan = Math.min(8, maxIndex);
-  const nextSpan = clamp(span, minSpan, maxIndex);
-  const nextStart = clamp(start, 0, maxIndex - nextSpan);
+  const nextSpan = clamp(span, minSpan, 100000);
+  const nextStart = Math.max(0, start);
 
   return {
     start: nextStart,
@@ -1502,6 +1500,7 @@ export function GraphEditor() {
   const plotSurfaceRef = useRef<HTMLDivElement>(null);
   const playheadDragRef = useRef(false);
   const playbackRangeDragRef = useRef<"start" | "end" | null>(null);
+  const kKeyRef = useRef(false);
   const boxSelectRef = useRef<BoxSelectState | null>(null);
   const nodeValueDragRef = useRef<NodeValueDragState | null>(null);
   const generatedHandleDragRef = useRef<GeneratedHandleDragState | null>(null);
@@ -1692,20 +1691,7 @@ export function GraphEditor() {
         : null,
     [selectedAxisRecord, selectedAxisNodePoints.length, selectedNode],
   );
-  const selectedFrameValue =
-    selectedAxisRecord && isMotionNumber(selectedAxisRecord.values[displayedCurrentFrame])
-      ? selectedAxisRecord.values[displayedCurrentFrame]
-      : null;
-  const selectedNodeValue =
-    selectedAxisRecord &&
-    selectedNode?.axisIndex === selectedAxisRecord.index &&
-    isMotionNumber(selectedAxisRecord.values[selectedNode.frame])
-      ? selectedAxisRecord.values[selectedNode.frame]
-      : null;
   const selectedAxisDisplayName = formatAxisDisplayName(selectedAxisRecord);
-  const hasFocusSelectedNode = selectedNodeValue !== null && selectedNode?.axisIndex === selectedAxisRecord?.index;
-  const focusTargetFrame = hasFocusSelectedNode && selectedNode ? selectedNode.frame : displayedCurrentFrame;
-  const focusTargetValue = hasFocusSelectedNode ? selectedNodeValue : selectedFrameValue ?? (selectedAxisRecord ? 0 : null);
   const selectedAxisNodeSelection = selectedNodes.filter((node) => node.axisIndex === selectedAxisRecord?.index);
   const activeSelectedNodes =
     selectedAxisRecord && selectedAxisNodeSelection.length > 0
@@ -1998,6 +1984,32 @@ export function GraphEditor() {
 
     setGeneratedSegments((current) => [...current, nextSegment]);
   };
+
+  useEffect(() => {
+    const isEditableTarget = (target: EventTarget | null) =>
+      target instanceof HTMLElement &&
+      (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
+
+    const handleKScrubKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "k" || event.key === "K") {
+        if (isEditableTarget(event.target)) return;
+        kKeyRef.current = true;
+      }
+    };
+    const handleKScrubKeyUp = (event: KeyboardEvent) => {
+      if (event.key === "k" || event.key === "K") {
+        kKeyRef.current = false;
+      }
+    };
+
+    window.addEventListener("keydown", handleKScrubKeyDown);
+    window.addEventListener("keyup", handleKScrubKeyUp);
+
+    return () => {
+      window.removeEventListener("keydown", handleKScrubKeyDown);
+      window.removeEventListener("keyup", handleKScrubKeyUp);
+    };
+  }, []);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -2802,29 +2814,68 @@ export function GraphEditor() {
     setYRange(buildDataYRange(axes));
   };
 
-  const focusSelectedAxisAtPlayhead = () => {
-    if (!selectedAxisRecord || focusTargetValue === null) return;
+  const computeFrameSelectionBounds = () => {
+    if (activeSelectedNodes.length > 0 && selectedAxisRecord) {
+      const frames = activeSelectedNodes.map((node) => node.frame);
+      const values = activeSelectedNodes
+        .map((node) => selectedAxisRecord.values[node.frame])
+        .filter(isMotionNumber);
 
-    const frame = focusTargetFrame;
+      if (values.length === 0) return null;
+
+      return {
+        minFrame: Math.min(...frames),
+        maxFrame: Math.max(...frames),
+        minValue: Math.min(...values),
+        maxValue: Math.max(...values),
+      };
+    }
+
+    if (selectedGeneratedSegment) {
+      const segmentAxis = axes.find((axis) => axis.index === selectedGeneratedSegment.axisIndex);
+      if (!segmentAxis) return null;
+
+      const frameBounds = buildGeneratedSegmentFrameBounds(selectedGeneratedSegment);
+      const scanStart = Math.max(0, Math.floor(frameBounds.minFrame));
+      const scanEnd = Math.min(segmentAxis.values.length - 1, Math.ceil(frameBounds.maxFrame));
+      const values: number[] = [];
+
+      for (let frame = scanStart; frame <= scanEnd; frame += 1) {
+        const value = segmentAxis.values[frame];
+        if (isMotionNumber(value)) values.push(value);
+      }
+
+      if (values.length === 0) return null;
+
+      return {
+        minFrame: frameBounds.minFrame,
+        maxFrame: frameBounds.maxFrame,
+        minValue: Math.min(...values),
+        maxValue: Math.max(...values),
+      };
+    }
+
+    return null;
+  };
+
+  const hasFrameSelectionTarget = activeSelectedNodes.length > 0 || selectedGeneratedSegment !== null;
+
+  const focusSelectedAxisAtPlayhead = () => {
+    const bounds = computeFrameSelectionBounds();
+    if (!bounds) return;
+
+    const frameSpan = Math.max(bounds.maxFrame - bounds.minFrame, 1);
+    const framePadding = Math.max(frameSpan * 0.2, 4);
+    const valueSpan = Math.max(bounds.maxValue - bounds.minValue, 0.001);
+    const valuePadding = Math.max(valueSpan * 0.2, 2);
     const nextRange = clampRange(
-      frame - FOCUS_FRAME_RADIUS,
-      FOCUS_FRAME_RADIUS * 2,
-      Math.max(timelineMaxIndex, frame + FOCUS_FRAME_RADIUS),
+      bounds.minFrame - framePadding,
+      frameSpan + framePadding * 2,
+      Math.max(timelineMaxIndex, bounds.maxFrame + framePadding),
     );
 
     applyVisibleRange(nextRange);
-    setCurrentFrame(frame);
-    if (hasFocusSelectedNode) {
-      setSelectedNode({ axisIndex: selectedAxisRecord.index, frame });
-      setSelectedNodes([{ axisIndex: selectedAxisRecord.index, frame }]);
-      setNodeSelectionKind("single");
-      syncNodeDegreeInput(selectedAxisRecord.values[frame]);
-    } else {
-      setSelectedNode(null);
-      setSelectedNodes([]);
-      setNodeSelectionKind(null);
-    }
-    setYRange({ min: focusTargetValue - FOCUS_DEGREE_RADIUS, max: focusTargetValue + FOCUS_DEGREE_RADIUS });
+    setYRange({ min: bounds.minValue - valuePadding, max: bounds.maxValue + valuePadding });
   };
 
   const handleWheel = (event: WheelEvent<HTMLDivElement>) => {
@@ -2851,6 +2902,11 @@ export function GraphEditor() {
   };
 
   const handleYWheel = (event: WheelEvent<HTMLDivElement>) => {
+    if (event.shiftKey) {
+      handleWheel(event);
+      return;
+    }
+
     event.preventDefault();
 
     const rect = event.currentTarget.getBoundingClientRect();
@@ -3387,6 +3443,15 @@ export function GraphEditor() {
       setNodeRangeContextMenu(null);
     }
 
+    if (event.button === 0 && kKeyRef.current) {
+      event.preventDefault();
+      event.currentTarget.setPointerCapture(event.pointerId);
+      playheadDragRef.current = true;
+      setIsDraggingPlayhead(true);
+      setPlayheadFromClientX(event.clientX, event.currentTarget);
+      return;
+    }
+
     if (
       event.button === 2 &&
       !copiedNodeRangePasteTarget &&
@@ -3452,6 +3517,11 @@ export function GraphEditor() {
   };
 
   const handlePointerMove = (event: PointerEvent<HTMLDivElement>) => {
+    if (playheadDragRef.current) {
+      setPlayheadFromClientX(event.clientX, event.currentTarget);
+      return;
+    }
+
     const nodeValueDrag = nodeValueDragRef.current;
     if (nodeValueDrag) {
       event.preventDefault();
@@ -3481,22 +3551,38 @@ export function GraphEditor() {
     const rect = event.currentTarget.getBoundingClientRect();
     const xSpan = drag.end - drag.start;
     const ySpan = Math.max(drag.yMax - drag.yMin, 0.0001);
-    const deltaDegrees = (event.clientY - drag.y) * (ySpan / rect.height);
+    const totalDeltaX = event.clientX - drag.x;
+    const totalDeltaY = event.clientY - drag.y;
+    const axisLock = event.shiftKey ? (Math.abs(totalDeltaX) >= Math.abs(totalDeltaY) ? "time" : "value") : null;
 
-    const framesPerPixel = xSpan / rect.width;
-    const deltaFrames = (event.clientX - drag.x) * framesPerPixel;
-    const nextStart = drag.start - deltaFrames;
-    applyVisibleRange(
-      frameCount > 1 ? clampRange(nextStart, xSpan, timelineMaxIndex) : clampFreeRange(nextStart, xSpan),
-    );
+    if (axisLock !== "value") {
+      const framesPerPixel = xSpan / rect.width;
+      const deltaFrames = totalDeltaX * framesPerPixel;
+      const nextStart = drag.start - deltaFrames;
+      applyVisibleRange(
+        frameCount > 1 ? clampRange(nextStart, xSpan, timelineMaxIndex) : clampFreeRange(nextStart, xSpan),
+      );
+    }
 
-    setYRange({
-      min: drag.yMin + deltaDegrees,
-      max: drag.yMax + deltaDegrees,
-    });
+    if (axisLock !== "time") {
+      const deltaDegrees = totalDeltaY * (ySpan / rect.height);
+      setYRange({
+        min: drag.yMin + deltaDegrees,
+        max: drag.yMax + deltaDegrees,
+      });
+    }
   };
 
   const handlePointerEnd = (event: PointerEvent<HTMLDivElement>) => {
+    if (playheadDragRef.current) {
+      playheadDragRef.current = false;
+      setIsDraggingPlayhead(false);
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      return;
+    }
+
     const boxSelection = boxSelectRef.current;
     if (boxSelection) {
       const rect = buildSelectionRect(boxSelection);
@@ -3765,7 +3851,7 @@ export function GraphEditor() {
           className="geTool"
           type="button"
           title="Frame Selection"
-          disabled={!selectedAxisRecord}
+          disabled={!hasFrameSelectionTarget}
           onClick={focusSelectedAxisAtPlayhead}
         >
           <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#c8c8c8" strokeWidth="1.4">

@@ -164,9 +164,15 @@ Phase 5  UX 정리·단축키
 
 **수용 기준**
 
-- [ ] 플롯 위에서 시간 줌 가능
-- [ ] Shift로 시간축만 / 값축만 팬·줌 가능
-- [ ] 줌 중심이 포인터 위치
+- [x] 플롯 위에서 시간 줌 가능
+- [x] Shift로 시간축만 / 값축만 팬·줌 가능
+- [x] 줌 중심이 포인터 위치
+
+**구현 메모 (제품 결정)**
+
+마우스 휠은 방향 정보가 없어(수직 delta만 존재) "Shift+방향"을 그대로 구현할 수 없음. 대신:
+- 팬(MMB 드래그): Shift 홀드 중 드래그 총 이동량이 수평 우세면 시간만, 수직 우세면 값만 이동.
+- 줌(휠): 룰러 휠 = 시간 전용(기존), 플롯 휠(모디파이어 없음) = 값 전용(기존), 플롯 휠 + Shift = 시간 전용(신규). 플롯 위에서 시간/값 줌 모두 도달 가능.
 
 ---
 
@@ -182,8 +188,8 @@ Phase 5  UX 정리·단축키
 
 **수용 기준**
 
-- [ ] 마지막 키 이후 / 첫 키 이전 구간을 뷰로 탐색 가능
-- [ ] Frame All은 여전히 데이터(또는 Playback Range)에 맞춤
+- [x] 마지막 키 이후 / 첫 키 이전 구간을 뷰로 탐색 가능
+- [x] Frame All은 여전히 데이터(또는 Playback Range)에 맞춤
 
 ---
 
@@ -201,8 +207,8 @@ Phase 5  UX 정리·단축키
 
 **수용 기준**
 
-- [ ] Frame Selection이 선택 키 min/max frame·value에 실제로 맞춤
-- [ ] 선택 없으면 Frame Selection 비활성 또는 Frame All과 동일 동작(명시)
+- [x] Frame Selection이 선택 키 min/max frame·value에 실제로 맞춤
+- [x] 선택 없으면 Frame Selection 비활성 또는 Frame All과 동일 동작(명시)
 
 ---
 
@@ -217,8 +223,8 @@ Phase 5  UX 정리·단축키
 
 **수용 기준**
 
-- [ ] K+드래그 시 노드 위치가 변하지 않음
-- [ ] 플레이헤드만 갱신
+- [x] K+드래그 시 노드 위치가 변하지 않음
+- [x] 플레이헤드만 갱신
 
 ---
 
@@ -374,12 +380,12 @@ Paste 모드:
 - [x] `time-playhead-decouple`
 
 ### Phase 2 — 네비게이션
-- [ ] `gv-nav-gestures`
-- [ ] `time-zoom-graph`
-- [ ] `time-pan-axis-lock`
-- [ ] `time-pan-beyond-data`
-- [ ] `gv-frame-ops`
-- [ ] `time-k-scrub`
+- [x] `gv-nav-gestures`
+- [x] `time-zoom-graph`
+- [x] `time-pan-axis-lock`
+- [x] `time-pan-beyond-data`
+- [x] `gv-frame-ops`
+- [x] `time-k-scrub`
 
 ### Phase 3 — 값
 - [ ] `val-numeric-edit`
