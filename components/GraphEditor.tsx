@@ -1579,7 +1579,13 @@ export function GraphEditor() {
     setVisibleRange({ ...snapshot.visibleRange });
     setPlaybackRange({ ...snapshot.playbackRange });
     setYRange({ ...snapshot.yRange });
-    setNodeDegreeInput(snapshot.nodeDegreeInput);
+    // nodeDegreeInput은 타이핑 중 즉시 갱신되는 draft 텍스트라, blur 커밋 전에 push된
+    // undo 스냅샷의 텍스트는 이미 새 값으로 앞서가 있을 수 있다. 복원 시에는 스냅샷에 저장된
+    // selectedNode가 가리키는 실제 axes 값에서 다시 계산해 화면과 데이터가 어긋나지 않게 한다.
+    const restoredNode = snapshot.selectedNode;
+    const restoredAxis = restoredNode ? snapshot.axes.find((axis) => axis.index === restoredNode.axisIndex) : undefined;
+    const restoredValue = restoredNode ? restoredAxis?.values[restoredNode.frame] : undefined;
+    setNodeDegreeInput(isMotionNumber(restoredValue) ? formatStatNumber(restoredValue) : snapshot.nodeDegreeInput);
     setSelectionRect(null);
     setGenerationMenu(null);
     setSegmentContextMenu(null);
@@ -2642,22 +2648,76 @@ export function GraphEditor() {
 
   const handleNodeDegreeInputChange = (value: string) => {
     setNodeDegreeInput(value);
+  };
 
-    const nextValue = Number(value);
-    const targetNode = activeSelectedNodes.length === 1 ? activeSelectedNodes[0] : null;
+  // Value 입력 정책: "+=N"/"-=N"은 선택된 모든 키에 상대 오프셋 적용,
+  // 그 외 절대값은 선택된 모든 키에 동일한 값을 적용한다 (다중 선택 시에도).
+  const commitNodeDegreeInput = () => {
+    const targets = activeSelectedNodes.filter((node) => node.axisIndex === selectedAxisRecord?.index);
 
-    if (
-      value.trim().length === 0 ||
-      !Number.isFinite(nextValue) ||
-      !selectedAxisRecord ||
-      !targetNode ||
-      targetNode.axisIndex !== selectedAxisRecord.index
-    ) {
+    if (!selectedAxisRecord || targets.length === 0) return;
+
+    const raw = nodeDegreeInput.trim();
+    const offsetMatch = raw.match(/^([+-])=\s*(\d+(?:\.\d+)?)$/);
+    const amount = offsetMatch ? Number(offsetMatch[2]) * (offsetMatch[1] === "-" ? -1 : 1) : Number(raw);
+
+    if (!Number.isFinite(amount)) {
+      syncNodeDegreeInput(primaryNodeValue ?? undefined);
       return;
     }
 
+    // 값이 실제로 바뀌는 대상이 없으면(예: 편집 없이 blur만 발생) undo 스냅샷을 남기지 않는다.
+    const updates = targets
+      .map((node) => {
+        const currentValue = selectedAxisRecord.values[node.frame];
+        if (!isMotionNumber(currentValue)) return null;
+
+        const nextValue = offsetMatch ? currentValue + amount : amount;
+        return nextValue === currentValue ? null : { node, nextValue };
+      })
+      .filter((entry): entry is { node: SelectedNode; nextValue: number } => entry !== null);
+
+    if (updates.length === 0) return;
+
     pushUndoSnapshot();
-    updateNodeValue(targetNode.axisIndex, targetNode.frame, nextValue);
+    updates.forEach(({ node, nextValue }) => updateNodeValue(node.axisIndex, node.frame, nextValue));
+  };
+
+  // Frame 편집 정책: 이미 키가 있는 프레임으로 이동하면 해당 프레임 값을 덮어쓴다 (overwrite).
+  const commitNodeFrameInput = (rawValue: string) => {
+    if (!selectedAxisRecord || !primaryNode || selectedGeneratedSegment) return;
+
+    const parsed = Number(rawValue.trim());
+    const fromFrame = primaryNode.frame;
+    const value = selectedAxisRecord.values[fromFrame];
+
+    if (!Number.isFinite(parsed) || !isMotionNumber(value)) return;
+
+    const toFrame = clamp(Math.round(parsed), 0, MAX_TIMELINE_FRAME);
+    if (toFrame === fromFrame) return;
+
+    pushUndoSnapshot();
+
+    setAxes((current) =>
+      current.map((axis) => {
+        if (axis.index !== selectedAxisRecord.index) return axis;
+
+        const nextValues = [...axis.values];
+        while (nextValues.length <= toFrame) {
+          nextValues.push(null);
+        }
+        nextValues[toFrame] = value;
+        nextValues[fromFrame] = null;
+
+        return { ...axis, values: nextValues };
+      }),
+    );
+
+    const nextNode = { axisIndex: selectedAxisRecord.index, frame: toFrame };
+    setSelectedNode(nextNode);
+    setSelectedNodes([nextNode]);
+    setNodeSelectionKind("single");
+    setCurrentFrame(toFrame);
   };
 
   const shiftSelectedNodeToLeft = () => {
@@ -3822,11 +3882,31 @@ export function GraphEditor() {
 
         {/* stats */}
         <span className="geStatLbl">Frame</span>
-        <input readOnly value={toolbarFrame} className="geStatIn" style={{ width: 64 }} />
+        <input
+          key={`toolbar-frame-${primaryNode?.axisIndex ?? "none"}-${primaryNode?.frame ?? "none"}`}
+          defaultValue={primaryNode ? String(primaryNode.frame) : toolbarFrame}
+          disabled={!primaryNode || selectedGeneratedSegment !== null}
+          className="geStatIn"
+          style={{ width: 64 }}
+          onBlur={(event) => commitNodeFrameInput(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") (event.target as HTMLInputElement).blur();
+          }}
+        />
         <span className="geStatLbl" style={{ marginLeft: 8 }}>
           Value
         </span>
-        <input readOnly value={toolbarValue} className="geStatIn" style={{ width: 82, color: "#4ca6d6" }} />
+        <input
+          value={activeSelectedNodes.length > 0 ? nodeDegreeInput : toolbarValue}
+          disabled={activeSelectedNodes.length === 0}
+          className="geStatIn"
+          style={{ width: 82, color: "#4ca6d6" }}
+          onChange={(event) => handleNodeDegreeInputChange(event.target.value)}
+          onBlur={commitNodeDegreeInput}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") (event.target as HTMLInputElement).blur();
+          }}
+        />
         <span className="geUnit">deg</span>
 
         <div className="geTDiv" />
@@ -4371,18 +4451,30 @@ export function GraphEditor() {
           <div className="geFields">
             <label className="geField">
               <span>Frame</span>
-              <input readOnly value={toolbarFrame} />
+              <input
+                key={`key-frame-${primaryNode?.axisIndex ?? "none"}-${primaryNode?.frame ?? "none"}`}
+                defaultValue={primaryNode ? String(primaryNode.frame) : toolbarFrame}
+                disabled={!primaryNode || selectedGeneratedSegment !== null}
+                onBlur={(event) => commitNodeFrameInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") (event.target as HTMLInputElement).blur();
+                }}
+              />
               <span className="geUnit">idx</span>
             </label>
             <label className="geField">
               <span>Value</span>
               <input
-                type="number"
-                step="0.1"
-                disabled={!selectedAxisRecord}
+                type="text"
+                title="숫자 절대값(모든 선택 키에 동일 적용) 또는 +=N / -=N 상대 오프셋"
+                disabled={activeSelectedNodes.length === 0}
                 style={{ color: "#4ca6d6" }}
                 value={nodeDegreeInput}
                 onChange={(event) => handleNodeDegreeInputChange(event.target.value)}
+                onBlur={commitNodeDegreeInput}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") (event.target as HTMLInputElement).blur();
+                }}
               />
               <span className="geUnit">deg</span>
             </label>
