@@ -283,6 +283,11 @@ button {
   cursor: not-allowed;
 }
 
+.axisContextMenuItem.active {
+  background: #3d5a52;
+  color: #7ec24f;
+}
+
 .curvePane {
   display: grid;
   grid-template-rows: 36px minmax(0, 1fr) 440px;

@@ -274,8 +274,15 @@ Phase 5  UX 정리·단축키
 
 **수용 기준**
 
-- [ ] 선택 키 또는 선택 구간에 프리셋 적용
-- [ ] 기존 bezier/spline 세그먼트와 충돌 시 변환 규칙 명시
+- [x] 선택 키 또는 선택 구간에 프리셋 적용
+- [x] 기존 bezier/spline 세그먼트와 충돌 시 변환 규칙 명시
+
+**구현 메모 (제품 결정)**
+
+- Flat은 별도 곡선을 만들지 않고 기존 `cubic`(smoothstep, 양끝 기울기 0·오버슈트 없음) 보간을 그대로 재사용한다.
+- Stepped은 `ratio >= 1 ? 1 : 0` — 다음 키 프레임 직전까지 시작값 유지 후 마지막 프레임에서 점프.
+- 기존 Generated Segment 인프라(핸들·미리보기·저장 갭 채우기 드롭다운)에 `SegmentInterpolationMode`로 자연스럽게 편입되어, Linear/Bezier 등과 동일한 방식(ctrl-선택 후 툴바 또는 우클릭 메뉴)으로 적용한다.
+- 충돌 규칙: `recordGeneratedSegments`는 새 세그먼트를 추가만 하고 기존에 겹치는 세그먼트를 제거하지 않는다(Linear/Bezier 등 기존 프리셋도 동일). 즉 같은 구간에 다른 프리셋을 다시 적용하면 세그먼트가 중첩 누적될 수 있음 — 이는 Flat/Stepped 추가 이전부터 있던 동작이며 이번 작업에서 변경하지 않았다.
 
 ---
 
@@ -291,8 +298,14 @@ Phase 5  UX 정리·단축키
 
 **수용 기준**
 
-- [ ] Break 후 In만 움직여도 Out 불변
-- [ ] Unify 후 상대 관계 복원
+- [x] Break 후 In만 움직여도 Out 불변
+- [x] Unify 후 상대 관계 복원
+
+**구현 메모 (제품 결정)**
+
+- `GeneratedHandlePosition`에 `rightAngle?`(없으면 Unify, 있으면 Break) · `weightLocked?`(true면 In/Out Weight 동기화) 필드를 추가.
+- TANGENT 패널에 In∠/Out∠ 필드와 Break/Unify, Lock/Free Weight 버튼 추가. 핸들 드래그·수치 입력 모두 Break/Lock 상태를 존중하도록 수정.
+- 브라우저에서 직접 검증: Break 후 In 핸들만 드래그 → Out∠ 값 불변 확인, Unify 클릭 → Out∠이 In∠과 다시 동일해짐을 확인.
 
 ---
 
@@ -311,9 +324,16 @@ Phase 5  UX 정리·단축키
 
 **수용 기준**
 
-- [ ] 드래그로 키가 다른 프레임으로 이동, 값 유지 옵션 동작
-- [ ] Scale 후 상대 간격 비율 유지
-- [ ] Nudge 1프레임 단위
+- [x] 드래그로 키가 다른 프레임으로 이동, 값 유지 옵션 동작
+- [ ] Scale 후 상대 간격 비율 유지 — 범위 밖(아래 메모)
+- [x] Nudge 1프레임 단위
+
+**구현 메모 (제품 결정 / 범위 축소)**
+
+- **키 수평 드래그**: 구현 완료. 단일 키 드래그 시 해당 키만, 이미 다중 선택된 상태에서 그 중 하나를 드래그하면 선택된 모든 키가 같은 델타만큼 이동(값 고정, 상대 간격 유지). 대상 프레임에 값이 있으면 덮어쓰기(W8 `commitNodeFrameInput`과 동일 정책). 드래그가 실제로 발생했을 때만 Undo 스냅샷 1개 생성, 순수 클릭은 기존 선택 동작 그대로 유지.
+- **Nudge**: ←/→ 1프레임, Shift+←/→ 10프레임. 입력 포커스가 텍스트 필드에 있을 때는 무시.
+- **Snap Keys**: 이 데이터 모델은 프레임이 항상 정수 배열 인덱스라 "정수 프레임에 스냅"이 이미 항상 참 — 해당 없음(N/A)으로 처리, 별도 UI 없음.
+- **Scale Keys**: 이번 패스에서 구현하지 않음(범위 축소). 피벗·UI 입력 방식(다이얼로그 vs 고정 배율 버튼)이 명시되지 않아 추측성 UI를 만들기보다 명확한 후속 요청으로 남김. 필요 시 `moveNodesByFrameDelta`/`applyNodeFrameMove`(이번에 추가한 배치 이동 유틸)를 재사용해 구현 가능.
 
 ---
 
@@ -331,8 +351,15 @@ Paste 모드:
 
 **수용 기준**
 
-- [ ] 세 모드가 UI에서 선택 가능하거나 기본 모드 + 옵션
-- [ ] 축·노드·세그먼트 기존 클립보드와 동작이 일관됨
+- [x] 세 모드가 UI에서 선택 가능하거나 기본 모드 + 옵션
+- [x] 축·노드·세그먼트 기존 클립보드와 동작이 일관됨
+
+**구현 메모 (제품 결정)**
+
+- 노드 범위 붙여넣기 컨텍스트 메뉴에 Merge(기본, 기존 동작 그대로) / Insert / Replace 버튼 추가.
+- Merge: 기존과 동일 — 복사한 오프셋만 덮어씀. Replace: 붙여넣기 구간 전체를 먼저 비운 뒤 복사한 키만 남김. Insert: 대상 프레임 이후 전체를 통째로 뒤로 밀어(기존 `shiftGeneratedSegmentFrames`를 음수 shift로 재사용해 생성 세그먼트도 함께 이동) 공간을 만든 뒤 붙여넣음.
+- 축/생성 세그먼트 클립보드(Copy/Paste axis, Copy/Paste generated segment)는 기존 단일 동작 그대로 유지 — 이번 모드 선택 UI는 노드 범위 붙여넣기에만 적용됨.
+- 버그 수정: 붙여넣기 대상 계산을 "메뉴를 열지 여부"(빈 공간 불필요)와 "Paste 버튼 활성화 여부"(Merge만 빈 공간 필요)로 분리했다. 원래 하나로 합쳐져 있어 대상 구간이 이미 채워져 있으면 Insert/Replace를 고를 새도 없이 메뉴 자체가 열리지 않는 문제가 있었음 — 브라우저 테스트로 발견·수정.
 
 ---
 
@@ -398,12 +425,12 @@ Paste 모드:
 - [x] `val-numeric-edit`
 
 ### Phase 4 — 모션 데이터
-- [ ] `data-tangent-presets`
-- [ ] `data-break-unify`
-- [ ] `data-key-ops`
-- [ ] `time-key-horizontal-drag`
-- [ ] `time-marker-to-keys-nudge`
-- [ ] `data-clipboard`
+- [x] `data-tangent-presets`
+- [x] `data-break-unify`
+- [ ] `data-key-ops` — Snap은 N/A 처리, Scale Keys는 범위 축소로 미구현 (W11 메모 참고)
+- [x] `time-key-horizontal-drag`
+- [x] `time-marker-to-keys-nudge`
+- [x] `data-clipboard`
 
 ### Phase 5 — UX
 - [ ] `ux-marking-stats`

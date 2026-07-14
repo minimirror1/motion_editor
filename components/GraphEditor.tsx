@@ -93,11 +93,13 @@ type SegmentInterpolationMode =
   | "circular"
   | "cubic"
   | "exponential"
+  | "flat"
   | "linear"
   | "quadratic"
   | "quartic"
   | "quintic"
-  | "sinusoidal";
+  | "sinusoidal"
+  | "stepped";
 type GeneratedSegmentMode = SegmentInterpolationMode | "spline";
 
 type MissingValueSaveStrategy = SegmentInterpolationMode;
@@ -143,6 +145,10 @@ type GeneratedHandlePosition = {
   angle: number;
   leftLength: number;
   rightLength: number;
+  // rightAngle이 없으면 Unify(양쪽 동일 각도), 있으면 Break(양쪽 독립 각도) 상태.
+  rightAngle?: number;
+  // true면 길이 Lock(한쪽 변경 시 반대쪽도 동일 길이로 동기화), false/undefined면 Free(독립).
+  weightLocked?: boolean;
 };
 
 type GeneratedHandleField = keyof GeneratedHandlePosition;
@@ -187,6 +193,15 @@ type NodeValueDragState = {
   startValue: number;
   startY: number;
   degreesPerPixel: number;
+};
+
+type NodeFrameDragState = {
+  axisIndex: number;
+  startClientX: number;
+  framesPerPixel: number;
+  baseValues: MotionValue[];
+  origins: Array<{ frame: number; value: number }>;
+  moved: boolean;
 };
 
 type GenerationMenuState = {
@@ -291,6 +306,8 @@ const DISCONNECTED_NODE_MARKER_MULTIPLIER = 2.1 * (2 / NODE_MARKER_SIZE_SCALE);
 const MAX_UNDO_HISTORY = 80;
 const generationModeOptions: Array<{ id: GeneratedSegmentMode; label: string }> = [
   { id: "linear", label: "Linear" },
+  { id: "flat", label: "Flat" },
+  { id: "stepped", label: "Stepped" },
   { id: "bezier", label: "Bezier" },
   { id: "sinusoidal", label: "Sinusoidal" },
   { id: "quadratic", label: "Quadratic" },
@@ -494,8 +511,13 @@ const buildInterpolationRatio = (ratio: number, mode: SegmentInterpolationMode) 
     return 1 - Math.sqrt(1 - ratio * ratio);
   }
 
-  if (mode === "cubic") {
+  if (mode === "cubic" || mode === "flat") {
+    // Flat: 양 끝 기울기 0, 오버슈트 없음 — 기존 cubic(smoothstep) 곡선을 그대로 재사용한다.
     return ratio * ratio * (3 - 2 * ratio);
+  }
+
+  if (mode === "stepped") {
+    return ratio >= 1 ? 1 : 0;
   }
 
   if (mode === "exponential") {
@@ -1253,7 +1275,8 @@ const computeHandleCurveValue = (
   const ratio = clamp((frame - startFrame) / frameSpan, 0, 1);
   const startLength = clamp(startHandle.rightLength, 0.1, frameSpan * 0.48);
   const endLength = clamp(endHandle.leftLength, 0.1, frameSpan * 0.48);
-  const startControlValue = startValue + handleAngleToSlope(startHandle.angle) * framesToSeconds(startLength);
+  const startControlValue =
+    startValue + handleAngleToSlope(startHandle.rightAngle ?? startHandle.angle) * framesToSeconds(startLength);
   const endControlValue = endValue - handleAngleToSlope(endHandle.angle) * framesToSeconds(endLength);
 
   return cubicBezierPoint(startValue, startControlValue, endControlValue, endValue, ratio);
@@ -1479,6 +1502,10 @@ const buildSelectionRect = (selection: BoxSelectState): SelectionRect => ({
 });
 
 const nodeKey = (node: SelectedNode) => `${node.axisIndex}:${node.frame}`;
+
+const isEditableTarget = (target: EventTarget | null) =>
+  target instanceof HTMLElement &&
+  (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
 const generatedSegmentKey = (segment: GeneratedSegment) => `${segment.id}`;
 
 const getSegmentContextMenuPosition = (clientX: number, clientY: number) => ({
@@ -1503,6 +1530,8 @@ export function GraphEditor() {
   const kKeyRef = useRef(false);
   const boxSelectRef = useRef<BoxSelectState | null>(null);
   const nodeValueDragRef = useRef<NodeValueDragState | null>(null);
+  const nodeFrameDragRef = useRef<NodeFrameDragState | null>(null);
+  const justDraggedNodeFrameRef = useRef(false);
   const generatedHandleDragRef = useRef<GeneratedHandleDragState | null>(null);
   const generatedSegmentIdRef = useRef(0);
   const undoStackRef = useRef<EditorSnapshot[]>([]);
@@ -1534,6 +1563,7 @@ export function GraphEditor() {
   const [copiedAxis, setCopiedAxis] = useState<CopiedAxis | null>(null);
   const [copiedGeneratedSegment, setCopiedGeneratedSegment] = useState<CopiedGeneratedSegment | null>(null);
   const [copiedNodeRange, setCopiedNodeRange] = useState<CopiedNodeRange | null>(null);
+  const [nodeRangePasteMode, setNodeRangePasteMode] = useState<"merge" | "insert" | "replace">("merge");
   const [saveGapDialog, setSaveGapDialog] = useState<SaveGapDialogState | null>(null);
   const [saveGapMode, setSaveGapMode] = useState<MissingValueSaveStrategy>("linear");
   const [savePendingDestination, setSavePendingDestination] = useState<SaveDestination>("client");
@@ -1737,7 +1767,8 @@ export function GraphEditor() {
       startValue,
     };
   })();
-  const copiedNodeRangePasteTarget = (() => {
+  // 붙여넣기 대상 후보: 컨텍스트 메뉴를 열지 결정하는 용도라 Merge의 "빈 공간 필요" 제약은 넣지 않는다.
+  const copiedNodeRangeCandidateTarget = (() => {
     const targetNode = activeSelectedNodes.length === 1 ? activeSelectedNodes[0] : null;
 
     if (!copiedNodeRange || !selectedAxisRecord || !targetNode) return null;
@@ -1746,24 +1777,30 @@ export function GraphEditor() {
     const startValue = selectedAxisRecord.values[targetNode.frame];
     if (!isMotionNumber(startValue)) return null;
 
-    const endFrame = targetNode.frame + copiedNodeRange.duration;
+    return {
+      axis: selectedAxisRecord,
+      endFrame: targetNode.frame + copiedNodeRange.duration,
+      startFrame: targetNode.frame,
+      startValue,
+    };
+  })();
+  // 실제 Paste 버튼 활성화·붙여넣기에 쓰는 대상: 모드별 유효성(Merge는 빈 공간 필요)까지 반영한다.
+  const copiedNodeRangePasteTarget = (() => {
+    if (!copiedNodeRangeCandidateTarget || !copiedNodeRange || !selectedAxisRecord) return null;
+
+    const { startFrame } = copiedNodeRangeCandidateTarget;
     const lastFrame = getLastMotionValueFrame(selectedAxisRecord.values);
+    // Insert/Replace 모드는 기존 데이터를 밀어내거나 지우고 붙여넣으므로 빈 공간일 필요가 없다.
     const hasRightSpace =
-      lastFrame === targetNode.frame ||
+      nodeRangePasteMode !== "merge" ||
+      lastFrame === startFrame ||
       copiedNodeRange.nodes.every(({ offset }) => {
-        const frame = targetNode.frame + offset;
+        const frame = startFrame + offset;
 
         return offset === 0 || !isMotionNumber(selectedAxisRecord.values[frame]);
       });
 
-    if (!hasRightSpace) return null;
-
-    return {
-      axis: selectedAxisRecord,
-      endFrame,
-      startFrame: targetNode.frame,
-      startValue,
-    };
+    return hasRightSpace ? copiedNodeRangeCandidateTarget : null;
   })();
   const nodeDegreeValue = Number(nodeDegreeInput);
   const isNodeDegreeInputValid = nodeDegreeInput.trim().length > 0 && Number.isFinite(nodeDegreeValue);
@@ -1809,7 +1846,8 @@ export function GraphEditor() {
       !selectedAxisRecord ||
       !selectedGeneratedSegment ||
       selectedGeneratedSegment.axisIndex !== selectedAxis ||
-      selectedGeneratedSegment.mode === "linear"
+      selectedGeneratedSegment.mode === "linear" ||
+      selectedGeneratedSegment.mode === "stepped"
     ) {
       return new Map<number, GeneratedHandleRenderData>();
     }
@@ -1828,11 +1866,12 @@ export function GraphEditor() {
 
       if (!isMotionNumber(value) || !handle) return;
 
-      const slope = handleAngleToSlope(handle.angle);
+      const leftSlope = handleAngleToSlope(handle.angle);
+      const rightSlope = handleAngleToSlope(handle.rightAngle ?? handle.angle);
       const leftFrame = frame - handle.leftLength;
       const rightFrame = frame + handle.rightLength;
-      const leftValue = value - slope * framesToSeconds(handle.leftLength);
-      const rightValue = value + slope * framesToSeconds(handle.rightLength);
+      const leftValue = value - leftSlope * framesToSeconds(handle.leftLength);
+      const rightValue = value + rightSlope * framesToSeconds(handle.rightLength);
 
       nextHandles.set(frame, {
         center: toPlotPosition(frame, value, visibleRange, yRange.min, yRange.max),
@@ -1876,6 +1915,7 @@ export function GraphEditor() {
     selectedGeneratedHandle && selectedGeneratedHandleSegment
       ? selectedGeneratedHandleSegment.handles[selectedGeneratedHandle.frame.toString()] ?? null
       : null;
+  const isSelectedGeneratedHandleBroken = selectedGeneratedHandlePosition?.rightAngle !== undefined;
   const syncNodeDegreeInput = (value: MotionValue | undefined) => {
     if (isMotionNumber(value)) {
       setNodeDegreeInput(formatStatNumber(value));
@@ -1992,10 +2032,6 @@ export function GraphEditor() {
   };
 
   useEffect(() => {
-    const isEditableTarget = (target: EventTarget | null) =>
-      target instanceof HTMLElement &&
-      (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
-
     const handleKScrubKeyDown = (event: KeyboardEvent) => {
       if (event.key === "k" || event.key === "K") {
         if (isEditableTarget(event.target)) return;
@@ -2720,6 +2756,146 @@ export function GraphEditor() {
     setCurrentFrame(toFrame);
   };
 
+  // 프레임 이동 정책: 대상 프레임에 이미 값이 있으면 덮어쓴다 (commitNodeFrameInput과 동일한 overwrite 정책).
+  const applyNodeFrameMove = (
+    axisIndex: number,
+    baseValues: MotionValue[],
+    moves: Array<{ toFrame: number; value: number }>,
+  ) => {
+    const nextValues = [...baseValues];
+    moves.forEach(({ toFrame, value }) => {
+      while (nextValues.length <= toFrame) {
+        nextValues.push(null);
+      }
+      nextValues[toFrame] = value;
+    });
+
+    setAxes((current) => current.map((axis) => (axis.index === axisIndex ? { ...axis, values: nextValues } : axis)));
+  };
+
+  const nudgeSelectedNodes = (deltaFrames: number) => {
+    if (!selectedAxisRecord || selectedGeneratedSegment || deltaFrames === 0) return;
+
+    const nodes = activeSelectedNodes.filter((node) => node.axisIndex === selectedAxisRecord.index);
+    const origins = nodes
+      .map((node) => {
+        const value = selectedAxisRecord.values[node.frame];
+        return isMotionNumber(value) ? { frame: node.frame, value } : null;
+      })
+      .filter((entry): entry is { frame: number; value: number } => entry !== null);
+
+    if (origins.length === 0) return;
+
+    const baseValues = [...selectedAxisRecord.values];
+    origins.forEach(({ frame }) => {
+      baseValues[frame] = null;
+    });
+
+    const moves = origins.map(({ frame, value }) => ({
+      toFrame: clamp(frame + deltaFrames, 0, MAX_TIMELINE_FRAME),
+      value,
+    }));
+
+    pushUndoSnapshot();
+    applyNodeFrameMove(selectedAxisRecord.index, baseValues, moves);
+
+    const nextSelected = moves.map((move) => ({ axisIndex: selectedAxisRecord.index, frame: move.toFrame }));
+    setSelectedNodes(nextSelected);
+    setSelectedNode(nextSelected[0] ?? null);
+    setNodeSelectionKind(nextSelected.length > 1 ? "range" : nextSelected.length === 1 ? "single" : null);
+    setCurrentFrame(nextSelected[0]?.frame ?? currentFrame);
+  };
+
+  const nudgeSelectedNodesRef = useRef(nudgeSelectedNodes);
+  nudgeSelectedNodesRef.current = nudgeSelectedNodes;
+
+  useEffect(() => {
+    const handleNudgeKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      if (isEditableTarget(event.target)) return;
+
+      event.preventDefault();
+      const step = event.shiftKey ? 10 : 1;
+      nudgeSelectedNodesRef.current(event.key === "ArrowLeft" ? -step : step);
+    };
+
+    window.addEventListener("keydown", handleNudgeKeyDown);
+    return () => window.removeEventListener("keydown", handleNudgeKeyDown);
+  }, []);
+
+  // 키 수평 드래그: 다중 선택은 값 고정·시간만 함께 이동 (상대 간격 유지).
+  const handleKeyNodePointerDown = (event: PointerEvent<HTMLButtonElement>, node: SelectedNode) => {
+    if (event.button !== 0) return;
+    event.stopPropagation();
+
+    if (!selectedAxisRecord || selectedGeneratedSegment || node.axisIndex !== selectedAxisRecord.index) return;
+
+    const rect = plotSurfaceRef.current?.getBoundingClientRect();
+    if (!rect || rect.width === 0) return;
+
+    const isPartOfSelection = selectedNodeKeys.has(nodeKey(node));
+    const dragNodes = isPartOfSelection && activeSelectedNodes.length > 1 ? activeSelectedNodes : [node];
+    const origins = dragNodes
+      .map((dragNode) => {
+        const value = selectedAxisRecord.values[dragNode.frame];
+        return isMotionNumber(value) ? { frame: dragNode.frame, value } : null;
+      })
+      .filter((entry): entry is { frame: number; value: number } => entry !== null);
+
+    if (origins.length === 0) return;
+
+    event.currentTarget.setPointerCapture(event.pointerId);
+
+    const baseValues = [...selectedAxisRecord.values];
+    origins.forEach(({ frame }) => {
+      baseValues[frame] = null;
+    });
+
+    nodeFrameDragRef.current = {
+      axisIndex: selectedAxisRecord.index,
+      startClientX: event.clientX,
+      framesPerPixel: visibleFrameSpan / rect.width,
+      baseValues,
+      origins,
+      moved: false,
+    };
+  };
+
+  const handleKeyNodePointerMove = (event: PointerEvent<HTMLButtonElement>) => {
+    const drag = nodeFrameDragRef.current;
+    if (!drag) return;
+
+    const deltaFrames = Math.round((event.clientX - drag.startClientX) * drag.framesPerPixel);
+    if (deltaFrames === 0) return;
+
+    if (!drag.moved) {
+      pushUndoSnapshot();
+      drag.moved = true;
+    }
+
+    const moves = drag.origins.map(({ frame, value }) => ({
+      toFrame: clamp(frame + deltaFrames, 0, MAX_TIMELINE_FRAME),
+      value,
+    }));
+
+    applyNodeFrameMove(drag.axisIndex, drag.baseValues, moves);
+
+    const nextSelected = moves.map((move) => ({ axisIndex: drag.axisIndex, frame: move.toFrame }));
+    setSelectedNodes(nextSelected);
+    setSelectedNode(nextSelected[0] ?? null);
+    setCurrentFrame(nextSelected[0]?.frame ?? currentFrame);
+  };
+
+  const handleKeyNodePointerEnd = (event: PointerEvent<HTMLButtonElement>) => {
+    const drag = nodeFrameDragRef.current;
+    nodeFrameDragRef.current = null;
+    justDraggedNodeFrameRef.current = drag?.moved ?? false;
+
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  };
+
   const shiftSelectedNodeToLeft = () => {
     if (!selectedAxisRecord || !selectedShiftNode || !canShiftNode) return;
 
@@ -3119,7 +3295,7 @@ export function GraphEditor() {
     event.preventDefault();
     setAxisContextMenu(null);
 
-    if (copiedNodeRangePasteTarget) {
+    if (copiedNodeRangeCandidateTarget) {
       setGenerationMenu(null);
       setSegmentContextMenu(null);
       setNodeRangeContextMenu({
@@ -3226,10 +3402,28 @@ export function GraphEditor() {
     if (!copiedNodeRange || !copiedNodeRangePasteTarget) return;
 
     const { axis, endFrame, startFrame, startValue } = copiedNodeRangePasteTarget;
-    const nextValues = [...axis.values];
+    const insertSpan = endFrame - startFrame + 1;
+    let nextValues = [...axis.values];
 
-    while (nextValues.length <= endFrame) {
-      nextValues.push(null);
+    if (nodeRangePasteMode === "insert") {
+      // Insert: startFrame 이후 키를 통째로 뒤로 밀어 붙여넣을 공간을 만든다.
+      nextValues = [
+        ...nextValues.slice(0, startFrame),
+        ...(new Array(insertSpan).fill(null) as MotionValue[]),
+        ...nextValues.slice(startFrame),
+      ];
+    } else {
+      while (nextValues.length <= endFrame) {
+        nextValues.push(null);
+      }
+
+      if (nodeRangePasteMode === "replace") {
+        // Replace: 붙여넣기 구간 전체를 먼저 비운 뒤 복사한 키만 남긴다.
+        for (let frame = startFrame; frame <= endFrame; frame += 1) {
+          nextValues[frame] = null;
+        }
+      }
+      // Merge(기본값): 구간을 비우지 않고 복사한 오프셋만 덮어쓴다.
     }
 
     copiedNodeRange.nodes.forEach(({ offset, valueOffset }) => {
@@ -3254,12 +3448,18 @@ export function GraphEditor() {
       ),
     );
     setGeneratedSegments((current) =>
-      current.filter(
-        (segment) =>
-          segment.axisIndex !== axis.index ||
-          segment.endFrame < startFrame ||
-          segment.startFrame > endFrame,
-      ),
+      nodeRangePasteMode === "insert"
+        ? current.map((segment) =>
+            segment.axisIndex === axis.index
+              ? shiftGeneratedSegmentFrames(segment, startFrame, -insertSpan)
+              : segment,
+          )
+        : current.filter(
+            (segment) =>
+              segment.axisIndex !== axis.index ||
+              segment.endFrame < startFrame ||
+              segment.startFrame > endFrame,
+          ),
     );
     setSelectedAxis(axis.index);
     setSelectedGeneratedSegmentKey(null);
@@ -3420,10 +3620,47 @@ export function GraphEditor() {
 
     pushUndoSnapshot();
 
+    updateGeneratedHandle(selectedGeneratedHandle.segmentId, selectedGeneratedHandle.frame, (handle) => {
+      if (field === "angle" || field === "rightAngle") {
+        return { ...handle, [field]: nextValue };
+      }
+
+      const clampedLength = Math.max(0.1, nextValue);
+      return handle.weightLocked
+        ? { ...handle, leftLength: clampedLength, rightLength: clampedLength }
+        : { ...handle, [field]: clampedLength };
+    });
+  };
+
+  const breakSelectedGeneratedHandle = () => {
+    if (!selectedGeneratedHandle) return;
+
+    pushUndoSnapshot();
     updateGeneratedHandle(selectedGeneratedHandle.segmentId, selectedGeneratedHandle.frame, (handle) => ({
       ...handle,
-      [field]: field === "angle" ? nextValue : Math.max(0.1, nextValue),
+      rightAngle: handle.rightAngle ?? handle.angle,
     }));
+  };
+
+  const unifySelectedGeneratedHandle = () => {
+    if (!selectedGeneratedHandle) return;
+
+    pushUndoSnapshot();
+    updateGeneratedHandle(selectedGeneratedHandle.segmentId, selectedGeneratedHandle.frame, (handle) => {
+      const { rightAngle: _rightAngle, ...unified } = handle;
+      return unified;
+    });
+  };
+
+  const toggleSelectedGeneratedHandleWeightLock = () => {
+    if (!selectedGeneratedHandle) return;
+
+    pushUndoSnapshot();
+    updateGeneratedHandle(selectedGeneratedHandle.segmentId, selectedGeneratedHandle.frame, (handle) =>
+      handle.weightLocked
+        ? { ...handle, weightLocked: false }
+        : { ...handle, weightLocked: true, leftLength: handle.leftLength, rightLength: handle.leftLength },
+    );
   };
 
   const getPlotDataFromClient = (clientX: number, clientY: number) => {
@@ -3481,11 +3718,15 @@ export function GraphEditor() {
     const tangentRise = drag.side === "right" ? pointer.value - drag.centerValue : drag.centerValue - pointer.value;
     const angle = Math.atan2(tangentRise, framesToSeconds(length)) * (180 / Math.PI);
 
-    updateGeneratedHandle(drag.segmentId, drag.frame, (handle) => ({
-      ...handle,
-      angle,
-      [drag.side === "right" ? "rightLength" : "leftLength"]: length,
-    }));
+    updateGeneratedHandle(drag.segmentId, drag.frame, (handle) => {
+      const isBroken = handle.rightAngle !== undefined;
+      const angleUpdate = drag.side === "right" && isBroken ? { rightAngle: angle } : { angle };
+      const lengthUpdate = handle.weightLocked
+        ? { leftLength: length, rightLength: length }
+        : { [drag.side === "right" ? "rightLength" : "leftLength"]: length };
+
+      return { ...handle, ...angleUpdate, ...lengthUpdate };
+    });
   };
 
   const handleGeneratedHandlePointerEnd = (event: PointerEvent<HTMLButtonElement>) => {
@@ -3514,7 +3755,7 @@ export function GraphEditor() {
 
     if (
       event.button === 2 &&
-      !copiedNodeRangePasteTarget &&
+      !copiedNodeRangeCandidateTarget &&
       !copiedGeneratedSegmentPasteTarget &&
       selectedAxisRecord &&
       activeSelectedNodes.length === 1
@@ -3723,11 +3964,12 @@ export function GraphEditor() {
     ? generatedSegmentLabels[selectedAxisSegments[selectedAxisSegments.length - 1].mode]
     : "None";
   const activeTangentTool =
-    selectedGeneratedSegment?.mode === "spline"
-      ? "spline"
-      : selectedGeneratedSegment?.mode === "linear"
-        ? "linear"
-        : null;
+    selectedGeneratedSegment?.mode === "spline" ||
+    selectedGeneratedSegment?.mode === "linear" ||
+    selectedGeneratedSegment?.mode === "flat" ||
+    selectedGeneratedSegment?.mode === "stepped"
+      ? selectedGeneratedSegment.mode
+      : null;
 
   const tangentTools: Array<{
     id: string;
@@ -3753,8 +3995,21 @@ export function GraphEditor() {
       disabled: !canGenerateSegment,
       mode: "linear",
     },
-    { id: "flat", title: "Flat Tangents (decorative)", path: "M2 8h12", dead: true },
-    { id: "stepped", title: "Stepped Tangents (decorative)", path: "M2 12h5V5h7", join: true, dead: true },
+    {
+      id: "flat",
+      title: "Flat Tangents (generate flat/smoothstep from a ctrl-selection)",
+      path: "M2 8h12",
+      disabled: !canGenerateSegment,
+      mode: "flat",
+    },
+    {
+      id: "stepped",
+      title: "Stepped Tangents (generate stepped from a ctrl-selection)",
+      path: "M2 12h5V5h7",
+      join: true,
+      disabled: !canGenerateSegment,
+      mode: "stepped",
+    },
     { id: "plateau", title: "Plateau Tangents (decorative)", path: "M2 11C5 11 5 5 8 5s3 6 6 6", dead: true },
   ];
 
@@ -4325,6 +4580,11 @@ export function GraphEditor() {
                           onClick={(event) => {
                             event.stopPropagation();
 
+                            if (justDraggedNodeFrameRef.current) {
+                              justDraggedNodeFrameRef.current = false;
+                              return;
+                            }
+
                             if (event.ctrlKey && selectedGeneratedSegment === null) {
                               if (selectedNodeKeys.has(currentNodeKey)) {
                                 const nextSelectedNodes = selectedNodes.filter(
@@ -4375,11 +4635,10 @@ export function GraphEditor() {
                             setSelectedGeneratedHandle(null);
                             syncNodeDegreeInput(selectedAxisRecord?.values[node.frame]);
                           }}
-                          onPointerDown={(event) => {
-                            if (event.button === 0) {
-                              event.stopPropagation();
-                            }
-                          }}
+                          onPointerDown={(event) => handleKeyNodePointerDown(event, node)}
+                          onPointerMove={handleKeyNodePointerMove}
+                          onPointerUp={handleKeyNodePointerEnd}
+                          onPointerCancel={handleKeyNodePointerEnd}
                         />
                       </Fragment>
                     );
@@ -4401,7 +4660,7 @@ export function GraphEditor() {
           </div>
           <div className="geFields">
             <label className="geField">
-              <span>Angle</span>
+              <span>In &ang;</span>
               <input
                 type="number"
                 step="0.1"
@@ -4412,6 +4671,40 @@ export function GraphEditor() {
               />
               <span className="geUnit">deg</span>
             </label>
+            <label className="geField">
+              <span>Out &ang;</span>
+              <input
+                type="number"
+                step="0.1"
+                disabled={!selectedGeneratedHandlePosition || !isSelectedGeneratedHandleBroken}
+                style={{ color: "#e8912a" }}
+                value={
+                  selectedGeneratedHandlePosition
+                    ? formatStatNumber(
+                        selectedGeneratedHandlePosition.rightAngle ?? selectedGeneratedHandlePosition.angle,
+                      )
+                    : ""
+                }
+                onChange={(event) => updateSelectedGeneratedHandleField("rightAngle", event.target.value)}
+              />
+              <span className="geUnit">deg</span>
+            </label>
+            <div className="geKeyBtns">
+              <button
+                type="button"
+                disabled={!selectedGeneratedHandlePosition || isSelectedGeneratedHandleBroken}
+                onClick={breakSelectedGeneratedHandle}
+              >
+                Break
+              </button>
+              <button
+                type="button"
+                disabled={!selectedGeneratedHandlePosition || !isSelectedGeneratedHandleBroken}
+                onClick={unifySelectedGeneratedHandle}
+              >
+                Unify
+              </button>
+            </div>
             <label className="geField">
               <span>In Weight</span>
               <input
@@ -4436,6 +4729,15 @@ export function GraphEditor() {
               />
               <span className="geUnit">idx</span>
             </label>
+            <div className="geKeyBtns">
+              <button
+                type="button"
+                disabled={!selectedGeneratedHandlePosition}
+                onClick={toggleSelectedGeneratedHandleWeightLock}
+              >
+                {selectedGeneratedHandlePosition?.weightLocked ? "Free Weight" : "Lock Weight"}
+              </button>
+            </div>
           </div>
 
           <div className="gePanelHdr">
@@ -4700,14 +5002,28 @@ export function GraphEditor() {
               Copy
             </button>
           ) : (
-            <button
-              className="axisContextMenuItem"
-              type="button"
-              disabled={!copiedNodeRangePasteTarget}
-              onClick={pasteNodeRangeFromContextMenu}
-            >
-              Paste
-            </button>
+            <>
+              {(["merge", "insert", "replace"] as const).map((mode) => (
+                <button
+                  key={mode}
+                  className={
+                    nodeRangePasteMode === mode ? "axisContextMenuItem active" : "axisContextMenuItem"
+                  }
+                  type="button"
+                  onClick={() => setNodeRangePasteMode(mode)}
+                >
+                  {mode === "merge" ? "Merge" : mode === "insert" ? "Insert" : "Replace"}
+                </button>
+              ))}
+              <button
+                className="axisContextMenuItem"
+                type="button"
+                disabled={!copiedNodeRangePasteTarget}
+                onClick={pasteNodeRangeFromContextMenu}
+              >
+                Paste
+              </button>
+            </>
           )}
         </div>
       ) : null}

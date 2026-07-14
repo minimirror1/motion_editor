@@ -76,6 +76,10 @@ npm install
 - Frame Selection이 선택 키/세그먼트의 실제 프레임·값 범위에 맞춰 뷰를 조정
 - K 홀드 + 드래그로 키 이동 없이 플레이헤드만 스크럽
 - 툴바/KEY 패널 Frame·Value 직접 입력 (절대값, `+=N`/`-=N` 상대 오프셋, 다중 선택 일괄 적용)
+- Flat/Stepped 탄젠트 프리셋 (기존 Linear/Bezier 등과 동일한 방식으로 적용)
+- 생성 세그먼트 핸들 Break/Unify(In·Out 각도 독립/동기화), Lock/Free Weight(길이 동기화)
+- 키 수평 드래그로 시간 이동(다중 선택은 값 고정), 방향키 Nudge(Shift=10프레임)
+- 노드 범위 붙여넣기 Merge/Insert/Replace 모드
 - 편집한 모션 데이터를 CSV로 저장
 
 ### 파일 입출력 조합
