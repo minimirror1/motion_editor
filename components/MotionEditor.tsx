@@ -1246,6 +1246,23 @@ const getGeneratedSegmentBaselineValue = (
   return isMotionNumber(baselineValue) ? baselineValue : values[frame];
 };
 
+// x(t)가 단조증가인 베지어에서 targetX에 대응하는 t를 이분탐색으로 역산 (weighted tangent의 시간 성분 반영용)
+const solveBezierTimeForX = (x0: number, x1: number, x2: number, x3: number, targetX: number) => {
+  let low = 0;
+  let high = 1;
+
+  for (let iteration = 0; iteration < 32; iteration += 1) {
+    const mid = (low + high) / 2;
+    if (cubicBezierPoint(x0, x1, x2, x3, mid) < targetX) {
+      low = mid;
+    } else {
+      high = mid;
+    }
+  }
+
+  return (low + high) / 2;
+};
+
 const computeHandleCurveValue = (
   frame: number,
   startFrame: number,
@@ -1256,13 +1273,22 @@ const computeHandleCurveValue = (
   endHandle: GeneratedHandlePosition,
 ) => {
   const frameSpan = Math.max(endFrame - startFrame, 1);
-  const ratio = clamp((frame - startFrame) / frameSpan, 0, 1);
-  const startLength = clamp(startHandle.rightLength, 0.1, frameSpan * 0.48);
-  const endLength = clamp(endHandle.leftLength, 0.1, frameSpan * 0.48);
+  // 컨트롤 x가 구간 안에 있으면 x(t) 단조가 보장되므로 길이는 구간 전체(1.0×span)까지 허용
+  const startLength = clamp(startHandle.rightLength, 0.1, frameSpan);
+  const endLength = clamp(endHandle.leftLength, 0.1, frameSpan);
+  const startControlFrame = startFrame + startLength;
+  const endControlFrame = endFrame - endLength;
   const startControlValue = startValue + handleAngleToSlope(startHandle.angle) * framesToSeconds(startLength);
   const endControlValue = endValue - handleAngleToSlope(endHandle.angle) * framesToSeconds(endLength);
+  const t = solveBezierTimeForX(
+    startFrame,
+    startControlFrame,
+    endControlFrame,
+    endFrame,
+    clamp(frame, startFrame, endFrame),
+  );
 
-  return cubicBezierPoint(startValue, startControlValue, endControlValue, endValue, ratio);
+  return cubicBezierPoint(startValue, startControlValue, endControlValue, endValue, t);
 };
 
 const applyGeneratedSegmentHandlesToValues = (values: MotionValue[], segment: GeneratedSegment): MotionValue[] => {
