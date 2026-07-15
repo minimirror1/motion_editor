@@ -1684,6 +1684,8 @@ export function GraphEditor() {
   const [axisInfinity, setAxisInfinity] = useState<Record<number, AxisInfinity>>({});
   const [bufferCurves, setBufferCurves] = useState<Record<number, MotionValue[]>>({});
   const [showBufferCurves, setShowBufferCurves] = useState(true);
+  const [hiddenAxes, setHiddenAxes] = useState<Set<number>>(new Set());
+  const [isolateSelectedAxis, setIsolateSelectedAxis] = useState(false);
   const [isPanning, setIsPanning] = useState(false);
   const [isDraggingPlayhead, setIsDraggingPlayhead] = useState(false);
   const [isDraggingNodeValue, setIsDraggingNodeValue] = useState(false);
@@ -2450,6 +2452,8 @@ export function GraphEditor() {
     setAxes(parsedAxes);
     setAxisInfinity({});
     setBufferCurves({});
+    setHiddenAxes(new Set());
+    setIsolateSelectedAxis(false);
     setGeneratedSegments([]);
     generatedSegmentIdRef.current = 0;
     setSelectedGeneratedSegmentKey(null);
@@ -3863,6 +3867,29 @@ export function GraphEditor() {
 
   const hasSelectedAxisBuffer = selectedAxisRecord !== null && bufferCurves[selectedAxisRecord.index] !== undefined;
 
+  // Maya Outliner 파리티: eye 토글로 축을 플롯에서 숨기고, Isolate로 선택 축만 표시한다.
+  // 표시/숨김은 뷰 상태이므로 undo 스택에 포함하지 않는다.
+  const isAxisVisibleInPlot = (axisIndex: number) =>
+    isolateSelectedAxis && selectedAxis !== null ? axisIndex === selectedAxis : !hiddenAxes.has(axisIndex);
+
+  const isSelectedAxisPlotVisible = selectedAxis !== null && isAxisVisibleInPlot(selectedAxis);
+
+  const toggleAxisVisibility = (axisIndex: number) => {
+    setHiddenAxes((previous) => {
+      const next = new Set(previous);
+      if (next.has(axisIndex)) {
+        next.delete(axisIndex);
+      } else {
+        next.add(axisIndex);
+      }
+      return next;
+    });
+  };
+
+  const toggleIsolateSelectedAxis = () => {
+    setIsolateSelectedAxis((previous) => !previous);
+  };
+
   const getPlotPointerPercent = (event: PointerEvent<HTMLDivElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
 
@@ -4776,6 +4803,18 @@ export function GraphEditor() {
             <path d="M2 5h10l-2.5-2.5M14 11H4l2.5 2.5" />
           </svg>
         </button>
+        <button
+          className={isolateSelectedAxis ? "geTool active" : "geTool"}
+          type="button"
+          title="Isolate Selected Axis (선택 축만 표시)"
+          disabled={selectedAxis === null && !isolateSelectedAxis}
+          onClick={toggleIsolateSelectedAxis}
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#d0d0d0" strokeWidth="1.4">
+            <rect x="1.5" y="3" width="13" height="10" rx="1.5" />
+            <path d="M4.5 8s1.3-2.3 3.5-2.3S11.5 8 11.5 8s-1.3 2.3-3.5 2.3S4.5 8 4.5 8Z" />
+          </svg>
+        </button>
 
         <div className="geTDiv" />
 
@@ -4890,6 +4929,20 @@ export function GraphEditor() {
                 onClick={() => selectAxis(axis.index)}
                 onContextMenu={(event) => handleAxisRowContextMenu(event, axis.index)}
               >
+                <span
+                  role="button"
+                  aria-label={hiddenAxes.has(axis.index) ? "Show axis in plot" : "Hide axis in plot"}
+                  className={hiddenAxes.has(axis.index) ? "geAxisEye off" : "geAxisEye"}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    toggleAxisVisibility(axis.index);
+                  }}
+                >
+                  <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3">
+                    <path d="M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8s-2.5 4.5-6.5 4.5S1.5 8 1.5 8Z" />
+                    <circle cx="8" cy="8" r="2" />
+                  </svg>
+                </span>
                 <span className="geSwatch" style={{ background: axisColors[index % axisColors.length] }} />
                 <span className="geAxisName">Axis {formatAxisDisplayName(axis)}</span>
                 <span className="geAxisTag">rotate</span>
@@ -5033,11 +5086,15 @@ export function GraphEditor() {
                 vectorEffect="non-scaling-stroke"
               />
 
-              {bufferCurvePolylines.map((points, bufferIndex) => (
-                <polyline className="bufferCurve" key={`buffer-${bufferIndex}`} points={points} />
-              ))}
+              {isSelectedAxisPlotVisible
+                ? bufferCurvePolylines.map((points, bufferIndex) => (
+                    <polyline className="bufferCurve" key={`buffer-${bufferIndex}`} points={points} />
+                  ))
+                : null}
 
               {renderedAxes.map((axis) => {
+                if (!isAxisVisibleInPlot(axis.index)) return null;
+
                 const axisIndex = axes.findIndex((candidate) => candidate.index === axis.index);
                 const segments = toPlotSegments(axis.values, visibleRange, yRange.min, yRange.max);
                 const generatedAxisSegments = generatedSegments.filter(
@@ -5089,10 +5146,10 @@ export function GraphEditor() {
                 );
               })}
 
-              {infinityPreview?.prePoints ? (
+              {isSelectedAxisPlotVisible && infinityPreview?.prePoints ? (
                 <polyline className="infinityCurve" points={infinityPreview.prePoints} />
               ) : null}
-              {infinityPreview?.postPoints ? (
+              {isSelectedAxisPlotVisible && infinityPreview?.postPoints ? (
                 <polyline className="infinityCurve" points={infinityPreview.postPoints} />
               ) : null}
             </svg>
@@ -5128,7 +5185,7 @@ export function GraphEditor() {
               />
             ) : null}
             <div className="nodeOverlay">
-              {regionScaleRect ? (
+              {regionScaleRect && isSelectedAxisPlotVisible ? (
                 <div
                   className="regionScaleBox"
                   style={{
@@ -5168,7 +5225,7 @@ export function GraphEditor() {
                   ) : null}
                 </div>
               ) : null}
-              {selectedAxis !== null
+              {selectedAxis !== null && isSelectedAxisPlotVisible
                 ? renderedSelectedAxisNodePoints.map((point) => {
                     const node = { axisIndex: selectedAxis, frame: point.frame };
                     const currentNodeKey = nodeKey(node);

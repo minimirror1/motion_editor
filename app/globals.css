@@ -2058,6 +2058,23 @@ button {
   background: #3d3d3d;
 }
 
+.geAxisEye {
+  align-items: center;
+  color: #9a9a9a;
+  cursor: pointer;
+  display: inline-flex;
+  flex: none;
+  justify-content: center;
+}
+
+.geAxisEye:hover {
+  color: #e0e0e0;
+}
+
+.geAxisEye.off {
+  color: #4a4a4a;
+}
+
 .geAxisRow.active {
   background: #39566b;
   border-left-color: #4ca6d6;
