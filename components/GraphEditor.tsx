@@ -312,6 +312,7 @@ type SaveFilePickerWritable = {
 };
 
 type SaveFilePickerHandle = {
+  name?: string;
   createWritable: () => Promise<SaveFilePickerWritable>;
 };
 
@@ -629,6 +630,136 @@ const ensureCsvFileName = (name: string) => {
   if (!trimmedName) return "motion.csv";
 
   return trimmedName.toLowerCase().endsWith(".csv") ? trimmedName : `${trimmedName}.csv`;
+};
+
+// ---- 모션 메타 사이드카 (<파일명>.csv.meta.json) ----
+// CSV는 외부 소비자 호환을 위해 순수 숫자 데이터만 유지하고,
+// 생성 세그먼트(베지어 핸들 각도/길이 포함)·Infinity 모드·축 이름은 사이드카 JSON에 영속화한다.
+const MOTION_META_VERSION = 1;
+
+const motionMetaPathFor = (csvPath: string) => `${csvPath}.meta.json`;
+
+type MotionMeta = {
+  generatedSegments: GeneratedSegment[];
+  axisInfinity: Record<number, AxisInfinity>;
+  axisNames: Record<number, string>;
+};
+
+const serializeMotionMeta = (
+  axes: MotionAxis[],
+  generatedSegments: GeneratedSegment[],
+  axisInfinity: Record<number, AxisInfinity>,
+): string =>
+  JSON.stringify(
+    {
+      version: MOTION_META_VERSION,
+      generatedSegments,
+      axisInfinity,
+      axisNames: Object.fromEntries(
+        axes.filter((axis) => axis.name !== undefined).map((axis) => [axis.index, axis.name]),
+      ),
+    },
+    null,
+    2,
+  );
+
+const isValidInfinityMode = (mode: unknown): mode is InfinityMode =>
+  mode === "constant" || mode === "cycle" || mode === "oscillate" || mode === "linear";
+
+const isValidGeneratedHandlePosition = (handle: unknown): handle is GeneratedHandlePosition => {
+  if (typeof handle !== "object" || handle === null) return false;
+
+  const candidate = handle as Record<string, unknown>;
+  return (
+    Number.isFinite(candidate.angle) &&
+    Number.isFinite(candidate.leftLength) &&
+    Number.isFinite(candidate.rightLength) &&
+    (candidate.rightAngle === undefined || Number.isFinite(candidate.rightAngle)) &&
+    (candidate.weightLocked === undefined || typeof candidate.weightLocked === "boolean")
+  );
+};
+
+const isValidHandleRecord = (record: unknown): record is Record<string, GeneratedHandlePosition> =>
+  typeof record === "object" &&
+  record !== null &&
+  Object.values(record).every((handle) => isValidGeneratedHandlePosition(handle));
+
+const isValidGeneratedSegment = (segment: unknown, axes: MotionAxis[]): segment is GeneratedSegment => {
+  if (typeof segment !== "object" || segment === null) return false;
+
+  const candidate = segment as Record<string, unknown>;
+  const axis = axes.find((entry) => entry.index === candidate.axisIndex);
+  if (!axis) return false;
+
+  const maxFrame = axis.values.length - 1;
+  const isValidFrame = (frame: unknown): frame is number =>
+    typeof frame === "number" && Number.isInteger(frame) && frame >= 0 && frame <= maxFrame;
+
+  return (
+    typeof candidate.id === "number" &&
+    typeof candidate.mode === "string" &&
+    candidate.mode in generatedSegmentLabels &&
+    isValidFrame(candidate.startFrame) &&
+    isValidFrame(candidate.endFrame) &&
+    Array.isArray(candidate.keyFrames) &&
+    candidate.keyFrames.length >= 2 &&
+    candidate.keyFrames.every(isValidFrame) &&
+    isValidHandleRecord(candidate.handles) &&
+    (candidate.initialHandles === undefined || isValidHandleRecord(candidate.initialHandles)) &&
+    (candidate.baselineValues === undefined ||
+      (typeof candidate.baselineValues === "object" &&
+        candidate.baselineValues !== null &&
+        Object.values(candidate.baselineValues).every((value) => Number.isFinite(value))))
+  );
+};
+
+// meta JSON을 파싱·검증한다. 손상되었거나 현재 CSV와 안 맞는 항목은 조용히 버려
+// meta가 없거나 깨져도 CSV 로드는 종전과 동일하게 동작한다.
+const parseMotionMeta = (text: string | null, axes: MotionAxis[]): MotionMeta => {
+  const emptyMeta: MotionMeta = { generatedSegments: [], axisInfinity: {}, axisNames: {} };
+  if (!text) return emptyMeta;
+
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (typeof parsed !== "object" || parsed === null) return emptyMeta;
+
+    const candidate = parsed as Record<string, unknown>;
+    const generatedSegments = Array.isArray(candidate.generatedSegments)
+      ? candidate.generatedSegments.filter((segment): segment is GeneratedSegment =>
+          isValidGeneratedSegment(segment, axes),
+        )
+      : [];
+    const axisInfinity =
+      typeof candidate.axisInfinity === "object" && candidate.axisInfinity !== null
+        ? Object.fromEntries(
+            Object.entries(candidate.axisInfinity).filter(
+              ([axisIndex, modes]) =>
+                axes.some((axis) => axis.index === Number(axisIndex)) &&
+                typeof modes === "object" &&
+                modes !== null &&
+                isValidInfinityMode((modes as Record<string, unknown>).pre) &&
+                isValidInfinityMode((modes as Record<string, unknown>).post),
+            ),
+          )
+        : {};
+    const axisNames =
+      typeof candidate.axisNames === "object" && candidate.axisNames !== null
+        ? Object.fromEntries(
+            Object.entries(candidate.axisNames).filter(
+              ([axisIndex, name]) =>
+                axes.some((axis) => axis.index === Number(axisIndex)) && typeof name === "string",
+            ),
+          )
+        : {};
+
+    return {
+      generatedSegments,
+      axisInfinity: axisInfinity as Record<number, AxisInfinity>,
+      axisNames: axisNames as Record<number, string>,
+    };
+  } catch {
+    return emptyMeta;
+  }
 };
 
 const buildInterpolationRatio = (ratio: number, mode: SegmentInterpolationMode) => {
@@ -2468,22 +2599,27 @@ export function GraphEditor() {
     generateSegmentMotionData(mode);
   };
 
-  const applyLoadedCsv = (text: string, displayName: string, serverPath: string | null) => {
+  const applyLoadedCsv = (text: string, displayName: string, serverPath: string | null, metaText: string | null = null) => {
     const parsedAxes = parseMotionCsv(text);
     const nextFrameCount = parsedAxes.reduce((max, axis) => Math.max(max, axis.values.length), 0);
     const nextMaxFrame = Math.max(0, nextFrameCount - 1);
+    const meta = parseMotionMeta(metaText, parsedAxes);
+    const namedAxes = parsedAxes.map((axis) =>
+      meta.axisNames[axis.index] !== undefined ? { ...axis, name: meta.axisNames[axis.index] } : axis,
+    );
 
     pushUndoSnapshot();
 
     setFileName(displayName);
     setServerRelativePath(serverPath);
-    setAxes(parsedAxes);
-    setAxisInfinity({});
+    setAxes(namedAxes);
+    setAxisInfinity(meta.axisInfinity);
     setBufferCurves({});
     setHiddenAxes(new Set());
     setIsolateSelectedAxis(false);
-    setGeneratedSegments([]);
-    generatedSegmentIdRef.current = 0;
+    setGeneratedSegments(meta.generatedSegments);
+    generatedSegmentIdRef.current =
+      meta.generatedSegments.reduce((maxId, segment) => Math.max(maxId, segment.id), -1) + 1;
     setSelectedGeneratedSegmentKey(null);
     setSelectedGeneratedHandle(null);
     setSelectedAxis(parsedAxes[0]?.index ?? null);
@@ -2498,10 +2634,21 @@ export function GraphEditor() {
   };
 
   const handleFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    const text = await file.text();
-    applyLoadedCsv(text, file.name, null);
+    const files = Array.from(event.target.files ?? []);
+    const csvFile = files.find((file) => file.name.toLowerCase().endsWith(".csv"));
+    if (!csvFile) {
+      event.target.value = "";
+      return;
+    }
+
+    // CSV와 함께 사이드카 meta(.csv.meta.json)를 같이 선택하면 핸들/세그먼트를 복원한다.
+    const exactMetaName = motionMetaPathFor(csvFile.name).toLowerCase();
+    const metaFile =
+      files.find((file) => file.name.toLowerCase() === exactMetaName) ??
+      files.find((file) => file.name.toLowerCase().endsWith(".meta.json"));
+    const text = await csvFile.text();
+    const metaText = metaFile ? await metaFile.text() : null;
+    applyLoadedCsv(text, csvFile.name, null, metaText);
     event.target.value = "";
   };
 
@@ -2523,7 +2670,16 @@ export function GraphEditor() {
       const res = await fetch(`/api/motions/file?path=${encodeURIComponent(entry.relativePath)}`);
       if (!res.ok) throw new Error(await res.text());
       const text = await res.text();
-      applyLoadedCsv(text, entry.name, entry.relativePath);
+      let metaText: string | null = null;
+      try {
+        const metaRes = await fetch(
+          `/api/motions/file?path=${encodeURIComponent(motionMetaPathFor(entry.relativePath))}`,
+        );
+        if (metaRes.ok) metaText = await metaRes.text();
+      } catch {
+        // meta는 선택 사항 — 없거나 읽기 실패해도 CSV 로드는 계속한다.
+      }
+      applyLoadedCsv(text, entry.name, entry.relativePath, metaText);
     } catch (err) {
       setError(`Server open failed: ${String(err)}`);
     }
@@ -2540,6 +2696,19 @@ export function GraphEditor() {
       if (!res.ok) {
         const msg = await res.text();
         setError(`Server save failed: ${msg}`);
+        return;
+      }
+      // 핸들 편집을 다시 열 수 있도록 세그먼트/Infinity/축 이름을 사이드카에 함께 저장.
+      // 세그먼트가 없어도 항상 덮어써서 오래된 meta가 남지 않게 한다.
+      const metaRes = await fetch(`/api/motions/file?path=${encodeURIComponent(motionMetaPathFor(targetPath))}`, {
+        method: "PUT",
+        body: serializeMotionMeta(axes, generatedSegments, axisInfinity),
+        headers: { "Content-Type": "application/json" },
+      });
+      if (!metaRes.ok) {
+        setError(`Server save: CSV saved, but meta save failed: ${await metaRes.text()}`);
+        setServerRelativePath(targetPath);
+        setFileName(targetPath.split("/").pop() ?? targetPath);
         return;
       }
       setServerRelativePath(targetPath);
@@ -2650,6 +2819,21 @@ export function GraphEditor() {
 
     const nextFileName = ensureCsvFileName(fileName || "motion.csv");
     const csvBlob = new Blob([serializeMotionCsv(axes, missingValueStrategy)], { type: "text/csv;charset=utf-8" });
+    // 세그먼트(핸들)가 있으면 사이드카 meta JSON을 함께 내려받아 다음에 CSV와 같이 열 수 있게 한다.
+    const downloadMotionMeta = (csvFileName: string) => {
+      if (generatedSegments.length === 0) return;
+
+      const metaBlob = new Blob([serializeMotionMeta(axes, generatedSegments, axisInfinity)], {
+        type: "application/json;charset=utf-8",
+      });
+      const metaUrl = URL.createObjectURL(metaBlob);
+      const metaLink = document.createElement("a");
+
+      metaLink.href = metaUrl;
+      metaLink.download = motionMetaPathFor(csvFileName);
+      metaLink.click();
+      URL.revokeObjectURL(metaUrl);
+    };
     const pickerWindow = window as SaveFilePickerWindow;
 
     if (pickerWindow.showSaveFilePicker) {
@@ -2668,6 +2852,7 @@ export function GraphEditor() {
         await writable.write(csvBlob);
         await writable.close();
         setFileName(nextFileName);
+        downloadMotionMeta(fileHandle.name ?? nextFileName);
         return;
       } catch (saveError) {
         if (saveError instanceof DOMException && saveError.name === "AbortError") {
@@ -2684,6 +2869,7 @@ export function GraphEditor() {
     downloadLink.click();
     URL.revokeObjectURL(csvUrl);
     setFileName(nextFileName);
+    downloadMotionMeta(nextFileName);
   };
 
   const getAxisContextMenuPosition = (clientX: number, clientY: number) => ({
@@ -4740,7 +4926,8 @@ export function GraphEditor() {
             ref={fileInputRef}
             className="hiddenInput"
             type="file"
-            accept=".csv,text/csv"
+            accept=".csv,text/csv,.json,application/json"
+            multiple
             onChange={handleFileChange}
           />
         </div>

@@ -20,7 +20,9 @@ export function assertCsvName(name: string): void {
   if (name.includes("/") || name.includes("\\") || name.includes("..")) {
     throw new Error("Invalid file name");
   }
-  if (!name.toLowerCase().endsWith(".csv")) {
+  // .csv.meta.json: CSV 사이드카(생성 세그먼트/핸들 등 에디터 메타데이터)
+  const lowerName = name.toLowerCase();
+  if (!lowerName.endsWith(".csv") && !lowerName.endsWith(".csv.meta.json")) {
     throw new Error("Only .csv files are allowed");
   }
 }
