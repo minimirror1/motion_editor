@@ -61,6 +61,7 @@ type ServerBrowserState = {
   files: ServerFileEntry[];
   loading: boolean;
   error: string;
+  notice: string;
 };
 
 type ServerSaveAsState = {
@@ -1852,6 +1853,7 @@ const sortAxesForRendering = (axes: MotionAxis[], selectedAxis: number | null) =
 
 export function GraphEditor() {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const libraryImportInputRef = useRef<HTMLInputElement>(null);
   const dragRef = useRef<DragState | null>(null);
   const plotSurfaceRef = useRef<HTMLDivElement>(null);
   const playheadDragRef = useRef(false);
@@ -2709,14 +2711,53 @@ export function GraphEditor() {
   };
 
   const openServerBrowser = async () => {
-    setServerBrowser({ files: [], loading: true, error: "" });
+    setServerBrowser({ files: [], loading: true, error: "", notice: "" });
     try {
       const res = await fetch("/api/motions");
       if (!res.ok) throw new Error(await res.text());
       const files: ServerFileEntry[] = await res.json() as ServerFileEntry[];
-      setServerBrowser({ files, loading: false, error: "" });
+      setServerBrowser({ files, loading: false, error: "", notice: "" });
     } catch (err) {
-      setServerBrowser({ files: [], loading: false, error: String(err) });
+      setServerBrowser({ files: [], loading: false, error: String(err), notice: "" });
+    }
+  };
+
+  // 라이브러리 export: MOTION_DIR 전체(csv+meta 쌍)를 zip 하나로 다운로드 — 로컬 설치를 다른 PC로 옮길 때 사용
+  const exportServerLibrary = () => {
+    const downloadLink = document.createElement("a");
+    downloadLink.href = "/api/motions/export";
+    downloadLink.download = "";
+    downloadLink.click();
+  };
+
+  // 라이브러리 import: export한 zip을 업로드해 서버 MOTION_DIR에 복원 (동일 파일명은 덮어씀)
+  const handleLibraryImportChange = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+
+    setServerBrowser((current) => (current ? { ...current, loading: true, error: "", notice: "" } : current));
+    try {
+      const res = await fetch("/api/motions/import", {
+        method: "POST",
+        body: file,
+        headers: { "Content-Type": "application/zip" },
+      });
+      const result = (await res.json()) as { error?: string; added?: string[]; overwritten?: string[] };
+      if (!res.ok) throw new Error(result.error ?? "import failed");
+
+      const listRes = await fetch("/api/motions");
+      const files: ServerFileEntry[] = listRes.ok ? ((await listRes.json()) as ServerFileEntry[]) : [];
+      setServerBrowser({
+        files,
+        loading: false,
+        error: "",
+        notice: `Imported — added ${result.added?.length ?? 0}, overwritten ${result.overwritten?.length ?? 0}`,
+      });
+    } catch (err) {
+      setServerBrowser((current) =>
+        current ? { ...current, loading: false, error: `Import failed: ${String(err)}` } : current,
+      );
     }
   };
 
@@ -6230,6 +6271,7 @@ export function GraphEditor() {
               <span>MOTION_DIR</span>
             </div>
             <div className="saveGapDialogBody serverBrowserBody">
+              {serverBrowser.notice ? <div className="serverBrowserStatus">{serverBrowser.notice}</div> : null}
               {serverBrowser.loading ? (
                 <div className="serverBrowserStatus">Loading…</div>
               ) : serverBrowser.error ? (
@@ -6258,6 +6300,21 @@ export function GraphEditor() {
             <div className="saveGapDialogFooter">
               <span />
               <div className="saveGapActions">
+                <button
+                  type="button"
+                  title="서버 라이브러리 전체(csv+meta)를 zip 하나로 다운로드"
+                  onClick={exportServerLibrary}
+                  disabled={serverBrowser.files.length === 0}
+                >
+                  Export Library
+                </button>
+                <button
+                  type="button"
+                  title="Export Library로 받은 zip을 업로드해 라이브러리 복원 (동일 파일명 덮어씀)"
+                  onClick={() => libraryImportInputRef.current?.click()}
+                >
+                  Import Library
+                </button>
                 <button type="button" onClick={() => void openServerBrowser()}>
                   Refresh
                 </button>
@@ -6266,6 +6323,13 @@ export function GraphEditor() {
                 </button>
               </div>
             </div>
+            <input
+              ref={libraryImportInputRef}
+              className="hiddenInput"
+              type="file"
+              accept=".zip,application/zip"
+              onChange={handleLibraryImportChange}
+            />
           </div>
         </div>
       ) : null}

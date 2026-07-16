@@ -36,9 +36,9 @@
 
 ## Phase M11 — 프로젝트 폴더 전체 내보내기/가져오기 (시나리오 2 대상)
 
-- [ ] M11-1. 서버 API `GET /api/motions/export`: MOTION_DIR 내 모든 `*.csv`+`*.csv.meta.json`을 zip으로 묶어 스트리밍 응답
-- [ ] M11-2. 서버 API `POST /api/motions/import`: 업로드된 zip의 각 엔트리를 `assertCsvName`+`resolveSafeMotionPath`로 검증 후 MOTION_DIR에 기록 (동일 파일명은 덮어씀), 결과로 추가/덮어쓴 파일 목록 반환
-- [ ] M11-3. UI: "Open from Server" 다이얼로그 상단에 **Export Library** / **Import Library** 버튼 추가, 가져오기 결과(추가 N개·덮어씀 M개) 토스트/문구 표시
+- [x] M11-1. 서버 API `GET /api/motions/export`: MOTION_DIR 내 모든 `*.csv`+`*.csv.meta.json`을 zip으로 묶어 스트리밍 응답
+- [x] M11-2. 서버 API `POST /api/motions/import`: 업로드된 zip의 각 엔트리를 `assertCsvName`+`resolveSafeMotionPath`로 검증 후 MOTION_DIR에 기록 (동일 파일명은 덮어씀), 결과로 추가/덮어쓴 파일 목록 반환
+- [x] M11-3. UI: "Open from Server" 다이얼로그 하단에 **Export Library** / **Import Library** 버튼 추가, 가져오기 결과(추가 N개·덮어씀 M개) 문구 표시
 
 수용 기준: PC A에서 여러 모션(핸들 포함) 저장 후 Export Library로 zip 다운로드 → PC B(별도 로컬 설치)에서 Import Library로 그 zip 업로드 →
 서버 파일 목록에 모든 csv가 나타나고 Open Server로 열면 핸들도 전부 복원.
